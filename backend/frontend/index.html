@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HackInterface - Pentest Automation</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <i class="fas fa-terminal"></i>
+                <span>HackInterface</span>
+            </div>
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active" data-section="dashboard">
+                    <i class="fas fa-tachometer-alt"></i>
+                    <span>Dashboard</span>
+                </a>
+                <a href="#" class="nav-item" data-section="vpn">
+                    <i class="fas fa-shield-alt"></i>
+                    <span>VPN</span>
+                </a>
+                <a href="#" class="nav-item" data-section="targets">
+                    <i class="fas fa-crosshairs"></i>
+                    <span>Cibles</span>
+                </a>
+                <a href="#" class="nav-item" data-section="actions">
+                    <i class="fas fa-tools"></i>
+                    <span>Actions</span>
+                </a>
+                <a href="#" class="nav-item" data-section="workflows">
+                    <i class="fas fa-project-diagram"></i>
+                    <span>Workflows</span>
+                </a>
+                <a href="#" class="nav-item" data-section="results">
+                    <i class="fas fa-file-alt"></i>
+                    <span>Résultats</span>
+                </a>
+                <a href="#" class="nav-item" data-section="reports">
+                    <i class="fas fa-file-pdf"></i>
+                    <span>Rapports</span>
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="vpn-status" id="vpn-indicator">
+                    <i class="fas fa-circle"></i>
+                    <span>VPN Déconnecté</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="header">
+                <div class="header-title">
+                    <h1 id="section-title">Dashboard</h1>
+                </div>
+                <div class="header-actions">
+                    <div class="tools-status" id="tools-status">
+                        <span class="status-badge loading">Vérification des outils...</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Content Sections -->
+            <div class="content">
+                <!-- Dashboard Section -->
+                <section id="section-dashboard" class="section active">
+                    <div class="dashboard-grid">
+                        <div class="card stats-card">
+                            <div class="card-icon"><i class="fas fa-crosshairs"></i></div>
+                            <div class="card-content">
+                                <h3 id="stat-targets">0</h3>
+                                <p>Cibles</p>
+                            </div>
+                        </div>
+                        <div class="card stats-card">
+                            <div class="card-icon"><i class="fas fa-tasks"></i></div>
+                            <div class="card-content">
+                                <h3 id="stat-actions">0</h3>
+                                <p>Actions</p>
+                            </div>
+                        </div>
+                        <div class="card stats-card">
+                            <div class="card-icon"><i class="fas fa-bug"></i></div>
+                            <div class="card-content">
+                                <h3 id="stat-vulns">0</h3>
+                                <p>Vulnérabilités</p>
+                            </div>
+                        </div>
+                        <div class="card stats-card">
+                            <div class="card-icon"><i class="fas fa-clock"></i></div>
+                            <div class="card-content">
+                                <h3 id="stat-time">0m</h3>
+                                <p>Durée</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-row">
+                        <div class="card quick-actions">
+                            <h3><i class="fas fa-bolt"></i> Actions rapides</h3>
+                            <div class="quick-buttons">
+                                <button class="btn btn-primary" onclick="showSection('vpn')">
+                                    <i class="fas fa-shield-alt"></i> Configurer VPN
+                                </button>
+                                <button class="btn btn-primary" onclick="showSection('targets')">
+                                    <i class="fas fa-plus"></i> Ajouter cible
+                                </button>
+                                <button class="btn btn-primary" onclick="showSection('workflows')">
+                                    <i class="fas fa-play"></i> Lancer workflow
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="card activity-log">
+                            <h3><i class="fas fa-history"></i> Activité récente</h3>
+                            <div class="log-container" id="activity-log">
+                                <p class="empty-state">Aucune activité pour le moment</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Graphiques statistiques -->
+                    <div class="dashboard-row charts-row">
+                        <div class="card chart-card">
+                            <h3><i class="fas fa-chart-pie"></i> Vulnérabilités par sévérité</h3>
+                            <div class="chart-container">
+                                <canvas id="vuln-severity-chart"></canvas>
+                            </div>
+                            <div class="chart-legend" id="vuln-legend"></div>
+                        </div>
+
+                        <div class="card chart-card">
+                            <h3><i class="fas fa-chart-bar"></i> Ports découverts</h3>
+                            <div class="chart-container">
+                                <canvas id="ports-chart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="card chart-card">
+                            <h3><i class="fas fa-chart-doughnut"></i> Découvertes par type</h3>
+                            <div class="chart-container">
+                                <canvas id="discovery-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Session Management -->
+                    <div class="dashboard-row">
+                        <div class="card session-card">
+                            <h3><i class="fas fa-folder-open"></i> Sessions sauvegardées</h3>
+                            <div class="session-actions">
+                                <button class="btn btn-success" onclick="createNewSession()">
+                                    <i class="fas fa-plus"></i> Nouvelle session
+                                </button>
+                                <button class="btn btn-secondary" onclick="exportCurrentSession()">
+                                    <i class="fas fa-download"></i> Exporter
+                                </button>
+                                <button class="btn btn-secondary" onclick="triggerImportSession()">
+                                    <i class="fas fa-upload"></i> Importer
+                                </button>
+                                <input type="file" id="import-session-file" accept=".json" hidden>
+                            </div>
+                            <div class="sessions-list" id="sessions-list">
+                                <p class="empty-state">Aucune session sauvegardée</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VPN Section -->
+                <section id="section-vpn" class="section">
+                    <div class="section-grid">
+                        <div class="card">
+                            <h3><i class="fas fa-upload"></i> Configuration VPN</h3>
+                            <div class="vpn-config">
+                                <div class="upload-zone" id="vpn-upload-zone">
+                                    <i class="fas fa-cloud-upload-alt"></i>
+                                    <p>Glissez votre fichier .ovpn ici</p>
+                                    <p class="small">ou cliquez pour sélectionner</p>
+                                    <input type="file" id="vpn-file" accept=".ovpn" hidden>
+                                </div>
+                                <div class="vpn-file-info" id="vpn-file-info" style="display: none;">
+                                    <i class="fas fa-file-code"></i>
+                                    <span id="vpn-filename"></span>
+                                    <button class="btn btn-sm btn-danger" onclick="clearVpnFile()">
+                                        <i class="fas fa-times"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h3><i class="fas fa-plug"></i> Connexion</h3>
+                            <div class="vpn-connection">
+                                <div class="vpn-status-display" id="vpn-status-display">
+                                    <div class="status-icon disconnected">
+                                        <i class="fas fa-times-circle"></i>
+                                    </div>
+                                    <div class="status-text">
+                                        <h4>Déconnecté</h4>
+                                        <p id="vpn-ip">-</p>
+                                    </div>
+                                </div>
+                                <div class="vpn-buttons">
+                                    <button class="btn btn-success" id="btn-vpn-connect" onclick="connectVpn()">
+                                        <i class="fas fa-plug"></i> Connecter
+                                    </button>
+                                    <button class="btn btn-danger" id="btn-vpn-disconnect" onclick="disconnectVpn()" disabled>
+                                        <i class="fas fa-unlink"></i> Déconnecter
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card full-width">
+                            <h3><i class="fas fa-network-wired"></i> Test de connectivité</h3>
+                            <div class="ping-test">
+                                <div class="input-group">
+                                    <input type="text" id="ping-target" placeholder="IP ou hostname à tester">
+                                    <button class="btn btn-primary" onclick="pingTarget()">
+                                        <i class="fas fa-satellite-dish"></i> Ping
+                                    </button>
+                                </div>
+                                <div class="ping-result" id="ping-result"></div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Targets Section -->
+                <section id="section-targets" class="section">
+                    <div class="section-header">
+                        <h2>Gestion des cibles</h2>
+                        <button class="btn btn-danger" onclick="clearAllTargets()">
+                            <i class="fas fa-trash"></i> Tout supprimer
+                        </button>
+                    </div>
+
+                    <div class="card">
+                        <h3><i class="fas fa-plus-circle"></i> Ajouter une cible</h3>
+                        <form id="add-target-form" onsubmit="addTarget(event)">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Type de cible</label>
+                                    <select id="target-type" required>
+                                        <option value="ip">Adresse IP</option>
+                                        <option value="fqdn">FQDN (hostname)</option>
+                                        <option value="domain">Nom de domaine</option>
+                                        <option value="cidr">Plage CIDR</option>
+                                        <option value="url">URL</option>
+                                    </select>
+                                </div>
+                                <div class="form-group flex-grow">
+                                    <label>Valeur</label>
+                                    <input type="text" id="target-value" placeholder="ex: 10.10.10.1, example.com" required>
+                                </div>
+                                <div class="form-group flex-grow">
+                                    <label>Description (optionnel)</label>
+                                    <input type="text" id="target-description" placeholder="ex: Serveur web principal">
+                                </div>
+                                <div class="form-group">
+                                    <label>&nbsp;</label>
+                                    <button type="submit" class="btn btn-success">
+                                        <i class="fas fa-plus"></i> Ajouter
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+
+                    <div class="card">
+                        <h3><i class="fas fa-list"></i> Liste des cibles</h3>
+                        <div class="targets-list" id="targets-list">
+                            <p class="empty-state">Aucune cible ajoutée</p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Actions Section -->
+                <section id="section-actions" class="section">
+                    <div class="section-header">
+                        <h2>Actions individuelles</h2>
+                        <select id="action-target-select" class="target-select">
+                            <option value="">Sélectionner une cible...</option>
+                        </select>
+                    </div>
+
+                    <div class="actions-grid" id="actions-grid">
+                        <!-- Rempli dynamiquement -->
+                    </div>
+                </section>
+
+                <!-- Workflows Section -->
+                <section id="section-workflows" class="section">
+                    <div class="section-header">
+                        <h2>Workflows automatisés</h2>
+                        <select id="workflow-target-select" class="target-select">
+                            <option value="">Sélectionner une cible...</option>
+                        </select>
+                    </div>
+
+                    <div class="workflows-grid" id="workflows-grid">
+                        <!-- Rempli dynamiquement -->
+                    </div>
+
+                    <div class="card">
+                        <h3><i class="fas fa-cogs"></i> Workflow personnalisé</h3>
+                        <p>Sélectionnez les actions à exécuter dans l'ordre :</p>
+                        <div class="custom-workflow">
+                            <div class="custom-actions" id="custom-actions-list">
+                                <!-- Checkboxes générées dynamiquement -->
+                            </div>
+                            <button class="btn btn-primary" onclick="runCustomWorkflow()">
+                                <i class="fas fa-play"></i> Lancer le workflow personnalisé
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="card workflow-progress" id="workflow-progress" style="display: none;">
+                        <h3><i class="fas fa-spinner fa-spin"></i> Workflow en cours</h3>
+                        <div class="progress-info">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="workflow-progress-bar"></div>
+                            </div>
+                            <p id="workflow-status-text">Initialisation...</p>
+                        </div>
+                        <div class="workflow-log" id="workflow-log"></div>
+                    </div>
+                </section>
+
+                <!-- Results Section -->
+                <section id="section-results" class="section">
+                    <div class="section-header">
+                        <h2>Résultats</h2>
+                        <div class="header-buttons">
+                            <select id="results-target-filter" class="target-select" onchange="filterResults()">
+                                <option value="all">Toutes les cibles</option>
+                            </select>
+                            <button class="btn btn-danger" onclick="clearResults()">
+                                <i class="fas fa-trash"></i> Effacer
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="results-container" id="results-container">
+                        <p class="empty-state">Aucun résultat disponible</p>
+                    </div>
+                </section>
+
+                <!-- Reports Section -->
+                <section id="section-reports" class="section">
+                    <div class="card">
+                        <h3><i class="fas fa-file-export"></i> Générer un rapport</h3>
+                        <div class="report-options">
+                            <div class="form-group">
+                                <label>Type de rapport</label>
+                                <select id="report-type">
+                                    <option value="oscp">OSCP Style</option>
+                                    <option value="client">Rapport Client</option>
+                                    <option value="json">Export JSON</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="report-screenshots" checked>
+                                    Inclure les captures d'écran
+                                </label>
+                            </div>
+                            <button class="btn btn-primary btn-lg" onclick="generateReport()">
+                                <i class="fas fa-file-pdf"></i> Générer le rapport
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3><i class="fas fa-folder-open"></i> Rapports générés</h3>
+                        <div class="reports-list" id="reports-list">
+                            <p class="empty-state">Aucun rapport généré</p>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <!-- Terminal Output Panel -->
+        <div class="terminal-panel" id="terminal-panel">
+            <div class="terminal-header">
+                <span><i class="fas fa-terminal"></i> Output</span>
+                <div class="terminal-controls">
+                    <button onclick="clearTerminal()" title="Effacer">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                    <button onclick="toggleTerminal()" title="Réduire">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="terminal-content" id="terminal-content">
+                <p class="terminal-welcome">HackInterface Terminal Ready...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Container -->
+    <div class="notifications" id="notifications"></div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p>Chargement...</p>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
