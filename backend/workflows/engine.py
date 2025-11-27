@@ -302,13 +302,13 @@ class WorkflowEngine:
                 "target_types": ["ip"],
                 "steps": [
                     {"action": "nmap_quick", "name": "Initial Port Scan"},
-                    {"action": "msf_smb_version", "name": "SMB Version"},
-                    {"action": "msf_smb_ms17_010", "name": "EternalBlue Check"},
-                    {"action": "msf_ssh_version", "name": "SSH Version"},
-                    {"action": "msf_ftp_version", "name": "FTP Version"},
-                    {"action": "msf_http_version", "name": "HTTP Version"},
+                    {"action": "msf_smb_version", "name": "SMB Version", "condition": "has_smb"},
+                    {"action": "msf_smb_ms17_010", "name": "EternalBlue Check", "condition": "has_smb"},
+                    {"action": "msf_ssh_version", "name": "SSH Version", "condition": "has_ssh"},
+                    {"action": "msf_ftp_version", "name": "FTP Version", "condition": "has_ftp"},
+                    {"action": "msf_http_version", "name": "HTTP Version", "condition": "has_web"},
                 ],
-                "auto_chain": False
+                "auto_chain": True
             },
             "database_enum": {
                 "id": "database_enum",
@@ -317,10 +317,10 @@ class WorkflowEngine:
                 "target_types": ["ip"],
                 "steps": [
                     {"action": "nmap_quick", "name": "DB Port Scan", "options": {"ports": "1433,1521,3306,5432,27017,6379"}},
-                    {"action": "msf_mysql_login", "name": "MySQL Login Test"},
-                    {"action": "msf_postgres_login", "name": "PostgreSQL Login Test"},
+                    {"action": "msf_mysql_login", "name": "MySQL Login Test", "condition": "has_mysql"},
+                    {"action": "msf_postgres_login", "name": "PostgreSQL Login Test", "condition": "has_postgres"},
                 ],
-                "auto_chain": False
+                "auto_chain": True
             },
             "cms_audit": {
                 "id": "cms_audit",
@@ -329,12 +329,12 @@ class WorkflowEngine:
                 "target_types": ["url", "fqdn"],
                 "steps": [
                     {"action": "whatweb", "name": "CMS Detection"},
-                    {"action": "wpscan", "name": "WordPress Scan"},
-                    {"action": "joomscan", "name": "Joomla Scan"},
-                    {"action": "droopescan", "name": "Drupal/Other CMS Scan"},
+                    {"action": "wpscan", "name": "WordPress Scan", "condition": "has_wordpress"},
+                    {"action": "joomscan", "name": "Joomla Scan", "condition": "has_joomla"},
+                    {"action": "droopescan", "name": "Drupal/Other CMS Scan", "condition": "has_drupal"},
                     {"action": "nuclei", "name": "CMS Vulnerability Scan", "options": {"tags": "cms,wordpress,joomla,drupal"}},
                 ],
-                "auto_chain": False
+                "auto_chain": True
             },
         }
     
@@ -513,13 +513,25 @@ class WorkflowEngine:
         target_type: str,
         current_results: Dict[str, Any]
     ) -> bool:
-        """Vérifie une condition"""
+        """Vérifie une condition basée sur le type de cible ou les résultats précédents"""
+        
+        # Conditions basées sur le type de cible
         if condition == "is_domain":
             return target_type in ["domain", "fqdn"]
         elif condition == "is_ip":
             return target_type == "ip"
+        elif condition == "is_url":
+            return target_type == "url"
+        elif condition == "is_cidr":
+            return target_type == "cidr"
+        
+        # Conditions basées sur les ports découverts
         elif condition == "has_web":
-            return self._has_port(current_results, [80, 443, 8080, 8443])
+            return self._has_port(current_results, [80, 443, 8080, 8443, 8000, 8888])
+        elif condition == "has_http":
+            return self._has_port(current_results, [80, 8080, 8000, 8888])
+        elif condition == "has_https":
+            return self._has_port(current_results, [443, 8443])
         elif condition == "has_ssh":
             return self._has_port(current_results, [22])
         elif condition == "has_ftp":
@@ -532,18 +544,82 @@ class WorkflowEngine:
             return self._has_port(current_results, [3306])
         elif condition == "has_postgres":
             return self._has_port(current_results, [5432])
+        elif condition == "has_mssql":
+            return self._has_port(current_results, [1433])
+        elif condition == "has_oracle":
+            return self._has_port(current_results, [1521])
+        elif condition == "has_mongodb":
+            return self._has_port(current_results, [27017])
+        elif condition == "has_redis":
+            return self._has_port(current_results, [6379])
         elif condition == "has_ldap":
-            return self._has_port(current_results, [389, 636])
+            return self._has_port(current_results, [389, 636, 3268, 3269])
+        elif condition == "has_kerberos":
+            return self._has_port(current_results, [88])
+        elif condition == "has_dns":
+            return self._has_port(current_results, [53])
+        elif condition == "has_smtp":
+            return self._has_port(current_results, [25, 587, 465])
+        elif condition == "has_snmp":
+            return self._has_port(current_results, [161, 162])
+        elif condition == "has_vnc":
+            return self._has_port(current_results, [5900, 5901, 5902])
+        elif condition == "has_telnet":
+            return self._has_port(current_results, [23])
+        elif condition == "has_winrm":
+            return self._has_port(current_results, [5985, 5986])
+        
+        # Conditions basées sur les résultats d'analyse
+        elif condition == "has_wordpress":
+            return self._has_technology(current_results, "wordpress")
+        elif condition == "has_joomla":
+            return self._has_technology(current_results, "joomla")
+        elif condition == "has_drupal":
+            return self._has_technology(current_results, "drupal")
+        elif condition == "has_waf":
+            return self._has_waf(current_results)
+        
+        # Condition par défaut : True (exécuter l'étape)
         return True
     
     def _has_port(self, current_results: Dict[str, Any], ports: List[int]) -> bool:
-        """Vérifie si un port est ouvert dans les résultats"""
-        nmap_result = current_results.get("nmap_quick", {}) or current_results.get("nmap_full", {})
-        if nmap_result and "parsed_data" in nmap_result:
-            for host in nmap_result["parsed_data"].get("hosts", []):
-                for port_info in host.get("ports", []):
-                    if port_info.get("state") == "open" and port_info.get("port") in ports:
-                        return True
+        """Vérifie si un port est ouvert dans les résultats Nmap"""
+        # Chercher dans tous les résultats Nmap possibles
+        nmap_keys = ["nmap_quick", "nmap_full", "nmap_vuln", "nmap_udp", "masscan"]
+        
+        for key in nmap_keys:
+            nmap_result = current_results.get(key, {})
+            if nmap_result and isinstance(nmap_result, dict) and "parsed_data" in nmap_result:
+                parsed_data = nmap_result["parsed_data"]
+                if isinstance(parsed_data, dict):
+                    for host in parsed_data.get("hosts", []):
+                        for port_info in host.get("ports", []):
+                            if port_info.get("state") == "open" and port_info.get("port") in ports:
+                                return True
+        return False
+    
+    def _has_technology(self, current_results: Dict[str, Any], tech: str) -> bool:
+        """Vérifie si une technologie spécifique a été détectée"""
+        whatweb_result = current_results.get("whatweb", {})
+        if whatweb_result:
+            output = whatweb_result.get("output", "").lower()
+            if tech.lower() in output:
+                return True
+            parsed = whatweb_result.get("parsed_data", {})
+            if isinstance(parsed, dict) and parsed.get("cms", "").lower() == tech.lower():
+                return True
+        return False
+    
+    def _has_waf(self, current_results: Dict[str, Any]) -> bool:
+        """Vérifie si un WAF a été détecté"""
+        wafw00f_result = current_results.get("wafw00f", {})
+        if wafw00f_result:
+            output = wafw00f_result.get("output", "").lower()
+            # wafw00f affiche "No WAF detected" si pas de WAF
+            if "no waf detected" in output or "is not behind" in output:
+                return False
+            if "is behind" in output or "waf detected" in output:
+                return True
         return False
     
     def _analyze_discoveries(
@@ -556,7 +632,8 @@ class WorkflowEngine:
         """
         services = []
         
-        if action in ["nmap_quick", "nmap_full"]:
+        # Analyse des résultats Nmap
+        if action in ["nmap_quick", "nmap_full", "nmap_vuln", "masscan"]:
             parsed = result.get("parsed_data", {})
             for host in parsed.get("hosts", []):
                 for port in host.get("ports", []):
@@ -564,8 +641,32 @@ class WorkflowEngine:
                         services.append({
                             "port": port["port"],
                             "service": port["service"],
-                            "version": port.get("version", "")
+                            "version": port.get("version", ""),
+                            "scripts": port.get("scripts", [])
                         })
+        
+        # Analyse des résultats WhatWeb pour détecter les CMS
+        if action == "whatweb":
+            output = result.get("output", "").lower()
+            parsed = result.get("parsed_data", {})
+            
+            if "wordpress" in output or parsed.get("cms") == "wordpress":
+                services.append({"detected_cms": "wordpress"})
+            elif "joomla" in output or parsed.get("cms") == "joomla":
+                services.append({"detected_cms": "joomla"})
+            elif "drupal" in output or parsed.get("cms") == "drupal":
+                services.append({"detected_cms": "drupal"})
+        
+        # Analyse des résultats pour détecter des vulnérabilités connues
+        if action in ["nmap_vuln", "nmap_vulners"]:
+            output = result.get("output", "").lower()
+            parsed = result.get("parsed_data", {})
+            
+            # Détecter des vulnérabilités spécifiques
+            if "ms17-010" in output or "eternalblue" in output:
+                services.append({"vulnerability": "ms17-010", "exploit": "eternalblue"})
+            if "ms08-067" in output:
+                services.append({"vulnerability": "ms08-067", "exploit": "netapi"})
         
         return services
     
@@ -586,58 +687,185 @@ class WorkflowEngine:
         additional_actions = []
         
         for service in discovered_services:
-            port = service["port"]
-            svc = service["service"].lower()
+            # Détection de CMS
+            if "detected_cms" in service:
+                cms = service["detected_cms"]
+                if cms == "wordpress" and "wpscan" not in already_executed:
+                    additional_actions.append(("wpscan", {}))
+                elif cms == "joomla" and "joomscan" not in already_executed:
+                    additional_actions.append(("joomscan", {}))
+                elif cms == "drupal" and "droopescan" not in already_executed:
+                    additional_actions.append(("droopescan", {}))
+                continue
             
-            # Services web
-            if port in [80, 8080] or "http" in svc:
+            # Détection de vulnérabilités connues
+            if "vulnerability" in service:
+                vuln = service["vulnerability"]
+                if vuln == "ms17-010" and "msf_smb_ms17_010" not in already_executed:
+                    additional_actions.append(("msf_smb_ms17_010", {}))
+                continue
+            
+            port = service.get("port")
+            svc = service.get("service", "").lower()
+            version = service.get("version", "").lower()
+            
+            if not port:
+                continue
+            
+            # Services web HTTP
+            if port in [80, 8080, 8000, 8888] or ("http" in svc and "https" not in svc):
                 if "whatweb" not in already_executed:
                     additional_actions.append(("whatweb", {}))
                 if "gobuster" not in already_executed:
                     additional_actions.append(("gobuster", {}))
                 if "nuclei" not in already_executed:
                     additional_actions.append(("nuclei", {}))
+                if "nikto" not in already_executed:
+                    additional_actions.append(("nikto", {}))
             
-            # HTTPS
-            elif port in [443, 8443] or "https" in svc:
+            # Services web HTTPS
+            if port in [443, 8443] or "https" in svc or "ssl" in svc:
                 if "ssl_scan" not in already_executed:
                     additional_actions.append(("ssl_scan", {}))
                 if "whatweb" not in already_executed:
                     additional_actions.append(("whatweb", {}))
+                if "nuclei" not in already_executed:
+                    additional_actions.append(("nuclei", {}))
             
-            # SMB
-            elif port in [139, 445] or "smb" in svc or "microsoft-ds" in svc:
+            # SSH
+            if port == 22 or "ssh" in svc:
+                if "msf_ssh_version" not in already_executed:
+                    additional_actions.append(("msf_ssh_version", {}))
+                # Rechercher des vulnérabilités connues dans la version
+                if version and ("7.2" in version or "libssh" in version):
+                    if "searchsploit" not in already_executed:
+                        additional_actions.append(("searchsploit", {"query": f"ssh {version}"}))
+            
+            # FTP
+            if port == 21 or "ftp" in svc:
+                if "msf_ftp_version" not in already_executed:
+                    additional_actions.append(("msf_ftp_version", {}))
+                # Vérifier si anonymous login possible
+                if "anonymous" in version.lower() or "anonymous" in str(service.get("scripts", [])).lower():
+                    additional_actions.append(("ftp_anonymous", {}))
+            
+            # SMB / Windows
+            if port in [139, 445] or "smb" in svc or "microsoft-ds" in svc or "netbios" in svc:
                 if "enum4linux" not in already_executed:
                     additional_actions.append(("enum4linux", {}))
                 if "smbclient" not in already_executed:
                     additional_actions.append(("smbclient", {}))
+                if "msf_smb_version" not in already_executed:
+                    additional_actions.append(("msf_smb_version", {}))
+                if "msf_smb_ms17_010" not in already_executed:
+                    additional_actions.append(("msf_smb_ms17_010", {}))
             
-            # LDAP
-            elif port in [389, 636] or "ldap" in svc:
+            # RDP
+            if port == 3389 or "rdp" in svc or "ms-wbt-server" in svc:
+                if "nmap_rdp" not in already_executed:
+                    # Scan RDP spécifique avec scripts NSE
+                    additional_actions.append(("nmap_quick", {"ports": "3389", "scripts": "rdp-*"}))
+            
+            # LDAP / Active Directory
+            if port in [389, 636, 3268, 3269] or "ldap" in svc:
                 if "ldapsearch" not in already_executed:
                     additional_actions.append(("ldapsearch", {}))
+            
+            # Kerberos
+            if port == 88 or "kerberos" in svc:
+                if "enum4linux" not in already_executed:
+                    additional_actions.append(("enum4linux", {}))
+            
+            # MySQL
+            if port == 3306 or "mysql" in svc:
+                if "msf_mysql_login" not in already_executed:
+                    additional_actions.append(("msf_mysql_login", {}))
+            
+            # PostgreSQL
+            if port == 5432 or "postgres" in svc:
+                if "msf_postgres_login" not in already_executed:
+                    additional_actions.append(("msf_postgres_login", {}))
+            
+            # MSSQL
+            if port == 1433 or "ms-sql" in svc or "mssql" in svc:
+                if "nmap_quick" not in already_executed or True:  # Toujours faire un scan spécifique
+                    additional_actions.append(("nmap_quick", {"ports": "1433", "scripts": "ms-sql-*"}))
+            
+            # Redis
+            if port == 6379 or "redis" in svc:
+                additional_actions.append(("nmap_quick", {"ports": "6379", "scripts": "redis-*"}))
+            
+            # MongoDB
+            if port == 27017 or "mongodb" in svc:
+                additional_actions.append(("nmap_quick", {"ports": "27017", "scripts": "mongodb-*"}))
+            
+            # SNMP
+            if port == 161 or "snmp" in svc:
+                additional_actions.append(("nmap_quick", {"ports": "161", "scripts": "snmp-*"}))
+            
+            # DNS
+            if port == 53 or "dns" in svc or "domain" in svc:
+                if "dns_enum" not in already_executed:
+                    additional_actions.append(("dns_enum", {}))
+            
+            # SMTP
+            if port == 25 or port == 587 or "smtp" in svc:
+                additional_actions.append(("nmap_quick", {"ports": "25,587", "scripts": "smtp-*"}))
+            
+            # Recherche d'exploits si version détectée
+            if version and len(version) > 3:
+                service_name = svc.split("/")[0] if "/" in svc else svc
+                if service_name and "searchsploit" not in already_executed:
+                    # Ne pas faire trop de recherches searchsploit
+                    pass  # On pourrait ajouter: additional_actions.append(("searchsploit", {"query": f"{service_name} {version}"}))
+        
+        # Dédupliquer les actions
+        seen_actions = set()
+        unique_actions = []
+        for action, options in additional_actions:
+            action_key = f"{action}_{str(options)}"
+            if action_key not in seen_actions and action not in already_executed:
+                seen_actions.add(action_key)
+                unique_actions.append((action, options))
         
         # Exécuter les actions additionnelles
-        if additional_actions:
-            await ws_manager.send_log("info", f"Enchaînement automatique: {len(additional_actions)} actions supplémentaires")
+        if unique_actions:
+            await ws_manager.send_log("info", f"🔗 Enchaînement automatique: {len(unique_actions)} actions supplémentaires détectées")
             
-            for action, options in additional_actions:
+            for action, options in unique_actions:
                 if action in already_executed:
                     continue
+                
+                # Vérifier que l'action existe
+                if action not in self.action_map:
+                    await ws_manager.send_log("warning", f"Action inconnue ignorée: {action}")
+                    continue
                     
-                await ws_manager.send_log("info", f"Auto-chain: {action}")
+                await ws_manager.send_log("info", f"⚡ Auto-chain: {action}")
                 
                 try:
-                    if action in self.action_map:
-                        result = await self.action_map[action](target_value, options)
-                        results_store[target_id][action] = result
-                        already_executed.append(action)
-                        
-                        await ws_manager.send_action_update(
-                            action=action,
-                            status="completed",
-                            target_id=target_id,
-                            data=result
+                    result = await self.action_map[action](target_value, options)
+                    results_store[target_id][action] = result
+                    already_executed.append(action)
+                    
+                    await ws_manager.send_action_update(
+                        action=action,
+                        status="completed",
+                        target_id=target_id,
+                        data=result
+                    )
+                    
+                    # Analyser récursivement les nouvelles découvertes
+                    new_discoveries = self._analyze_discoveries(action, result)
+                    if new_discoveries:
+                        await ws_manager.send_log("info", f"🔍 Nouvelles découvertes depuis {action}, analyse en cours...")
+                        await self._auto_chain(
+                            new_discoveries,
+                            target,
+                            ws_manager,
+                            results_store,
+                            already_executed
                         )
+                        
                 except Exception as e:
-                    await ws_manager.send_log("error", f"Auto-chain error ({action}): {str(e)}")
+                    await ws_manager.send_log("error", f"❌ Auto-chain error ({action}): {str(e)}")

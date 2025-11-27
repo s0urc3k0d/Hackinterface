@@ -62,6 +62,9 @@ peas_module = PEASModule()
 workflow_engine = WorkflowEngine()
 report_generator = ReportGenerator()
 
+# Stockage des tâches de workflow actives pour permettre l'annulation
+active_workflow_tasks: dict[str, asyncio.Task] = {}
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gestion du cycle de vie de l'application"""
@@ -97,13 +100,27 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
 # ============================================================================
-# ROUTES - Interface principale
+# ROUTES - Interface principale et PWA
 # ============================================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Page principale de l'interface"""
     return FileResponse("frontend/index.html")
+
+@app.get("/manifest.json")
+async def get_manifest():
+    """Manifest PWA"""
+    return FileResponse("frontend/manifest.json", media_type="application/manifest+json")
+
+@app.get("/sw.js")
+async def get_service_worker():
+    """Service Worker PWA"""
+    return FileResponse(
+        "frontend/sw.js", 
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/"}
+    )
 
 # ============================================================================
 # ROUTES - Gestion VPN
@@ -149,6 +166,55 @@ async def ping_target(request: PingRequest):
         "success": success,
         "target": request.target,
         "output": result.stdout if success else result.stderr
+    }
+
+# ============================================================================
+# ROUTES - Validation des cibles
+# ============================================================================
+
+@app.post("/api/validate/target")
+async def validate_target_endpoint(request: dict):
+    """Valide une cible et retourne des informations détaillées"""
+    from core.executor import validate_target
+    
+    target = request.get("target", "")
+    result = validate_target(target)
+    
+    return {
+        "valid": result.valid,
+        "target_type": result.target_type,
+        "normalized": result.normalized,
+        "message": result.message,
+        "details": result.details
+    }
+
+@app.post("/api/validate/targets")
+async def validate_multiple_targets(request: dict):
+    """Valide plusieurs cibles en une fois"""
+    from core.executor import validate_target
+    
+    targets = request.get("targets", [])
+    results = []
+    
+    for target in targets:
+        result = validate_target(target)
+        results.append({
+            "target": target,
+            "valid": result.valid,
+            "target_type": result.target_type,
+            "normalized": result.normalized,
+            "message": result.message
+        })
+    
+    valid_count = sum(1 for r in results if r["valid"])
+    
+    return {
+        "results": results,
+        "summary": {
+            "total": len(targets),
+            "valid": valid_count,
+            "invalid": len(targets) - valid_count
+        }
     }
 
 # ============================================================================
@@ -467,8 +533,12 @@ async def run_workflow(request: WorkflowRequest):
     if not target:
         raise HTTPException(status_code=404, detail="Cible non trouvée")
     
-    # Lancer le workflow en arrière-plan
-    asyncio.create_task(
+    # Créer un ID unique pour cette exécution
+    import uuid
+    task_id = f"{request.workflow_id}_{request.target_id}_{uuid.uuid4().hex[:8]}"
+    
+    # Lancer le workflow en arrière-plan et stocker la tâche
+    task = asyncio.create_task(
         workflow_engine.execute(
             request.workflow_id,
             target,
@@ -477,8 +547,14 @@ async def run_workflow(request: WorkflowRequest):
             current_session["results"]
         )
     )
+    active_workflow_tasks[task_id] = task
     
-    return {"status": "started", "workflow_id": request.workflow_id}
+    # Nettoyer automatiquement quand la tâche se termine
+    def cleanup_task(t):
+        active_workflow_tasks.pop(task_id, None)
+    task.add_done_callback(cleanup_task)
+    
+    return {"status": "started", "workflow_id": request.workflow_id, "task_id": task_id}
 
 @app.post("/api/workflows/custom")
 async def run_custom_workflow(request: dict):
@@ -490,7 +566,11 @@ async def run_custom_workflow(request: dict):
     if not target:
         raise HTTPException(status_code=404, detail="Cible non trouvée")
     
-    asyncio.create_task(
+    # Créer un ID unique pour cette exécution
+    import uuid
+    task_id = f"custom_{target_id}_{uuid.uuid4().hex[:8]}"
+    
+    task = asyncio.create_task(
         workflow_engine.execute_custom(
             actions,
             target,
@@ -498,8 +578,57 @@ async def run_custom_workflow(request: dict):
             current_session["results"]
         )
     )
+    active_workflow_tasks[task_id] = task
     
-    return {"status": "started", "actions": actions}
+    # Nettoyer automatiquement quand la tâche se termine
+    def cleanup_task(t):
+        active_workflow_tasks.pop(task_id, None)
+    task.add_done_callback(cleanup_task)
+    
+    return {"status": "started", "actions": actions, "task_id": task_id}
+
+
+@app.post("/api/workflows/cancel")
+async def cancel_workflow(request: dict):
+    """Annuler un workflow en cours d'exécution"""
+    task_id = request.get("task_id")
+    
+    if not task_id:
+        raise HTTPException(status_code=400, detail="task_id requis")
+    
+    task = active_workflow_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Workflow non trouvé ou déjà terminé")
+    
+    if task.done():
+        active_workflow_tasks.pop(task_id, None)
+        return {"status": "already_completed", "message": "Le workflow était déjà terminé"}
+    
+    task.cancel()
+    active_workflow_tasks.pop(task_id, None)
+    
+    await ws_manager.send_log("warning", f"Workflow {task_id} annulé par l'utilisateur")
+    await ws_manager.send_workflow_update(
+        workflow_id=task_id,
+        status="cancelled"
+    )
+    
+    return {"status": "cancelled", "message": f"Workflow {task_id} annulé"}
+
+
+@app.get("/api/workflows/active")
+async def get_active_workflows():
+    """Liste des workflows actuellement en cours d'exécution"""
+    active = []
+    for task_id, task in list(active_workflow_tasks.items()):
+        if task.done():
+            active_workflow_tasks.pop(task_id, None)
+        else:
+            active.append({
+                "task_id": task_id,
+                "status": "running"
+            })
+    return {"active_workflows": active, "count": len(active)}
 
 # ============================================================================
 # ROUTES - Metasploit (API spécifique)
@@ -610,6 +739,419 @@ async def list_reports():
                 "created": os.path.getctime(filepath)
             })
     return reports
+
+# ============================================================================
+# ROUTES - Cache des résultats
+# ============================================================================
+
+@app.get("/api/cache/stats")
+async def get_cache_stats():
+    """Statistiques du cache des résultats"""
+    from core.cache import cache
+    return cache.get_stats()
+
+@app.get("/api/cache/target/{target}")
+async def get_cached_for_target(target: str):
+    """Liste les résultats en cache pour une cible"""
+    from core.cache import cache
+    entries = cache.get_cached_for_target(target)
+    return {"target": target, "cached_entries": entries, "count": len(entries)}
+
+@app.post("/api/cache/invalidate")
+async def invalidate_cache(request: dict):
+    """Invalide des entrées du cache"""
+    from core.cache import cache
+    
+    action = request.get("action")
+    target = request.get("target")
+    
+    deleted = cache.invalidate(action=action, target=target)
+    return {"status": "ok", "deleted": deleted}
+
+@app.post("/api/cache/cleanup")
+async def cleanup_cache():
+    """Nettoie les entrées expirées du cache"""
+    from core.cache import cache
+    deleted = cache.cleanup_expired()
+    return {"status": "ok", "deleted": deleted}
+
+# ============================================================================
+# ROUTES - Historique des commandes
+# ============================================================================
+
+@app.get("/api/history")
+async def get_command_history(
+    action: str = None,
+    target: str = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """Récupère l'historique des commandes"""
+    from core.history import command_history
+    entries = command_history.search(action=action, target=target, limit=limit, offset=offset)
+    return {
+        "status": "ok",
+        "count": len(entries),
+        "entries": [
+            {
+                "id": e.id,
+                "action": e.action,
+                "target": e.target,
+                "options": e.options,
+                "timestamp": e.timestamp,
+                "duration": e.duration,
+                "success": e.success,
+                "exit_code": e.exit_code
+            } for e in entries
+        ]
+    }
+
+@app.get("/api/history/stats")
+async def get_history_stats():
+    """Récupère les statistiques d'utilisation"""
+    from core.history import command_history
+    stats = command_history.get_statistics()
+    return {"status": "ok", **stats}
+
+@app.get("/api/history/{entry_id}")
+async def get_history_entry(entry_id: int):
+    """Récupère une entrée d'historique complète"""
+    from core.history import command_history
+    entry = command_history.get_entry(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entrée non trouvée")
+    return {
+        "status": "ok",
+        "entry": {
+            "id": entry.id,
+            "action": entry.action,
+            "target": entry.target,
+            "options": entry.options,
+            "command": entry.command,
+            "timestamp": entry.timestamp,
+            "duration": entry.duration,
+            "success": entry.success,
+            "exit_code": entry.exit_code,
+            "output_preview": entry.output_preview
+        }
+    }
+
+@app.post("/api/history/{entry_id}/replay")
+async def replay_history_entry(entry_id: int, background_tasks: BackgroundTasks):
+    """Rejoue une commande depuis l'historique"""
+    from core.history import command_history
+    entry = command_history.get_entry(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entrée non trouvée")
+    
+    # Créer un nouveau task_id pour la commande rejouée
+    import uuid
+    task_id = str(uuid.uuid4())[:8]
+    
+    # Lancer la commande en arrière-plan
+    background_tasks.add_task(
+        execute_and_broadcast,
+        entry.action,
+        entry.target,
+        entry.options or {},
+        task_id
+    )
+    
+    return {
+        "status": "ok",
+        "message": f"Commande {entry.action} rejouée",
+        "original_id": entry_id,
+        "new_task_id": task_id
+    }
+
+@app.delete("/api/history")
+async def clear_history(before_date: str = None):
+    """Vide l'historique (optionnellement avant une date)"""
+    from core.history import command_history
+    deleted = command_history.clear(before_date)
+    return {"status": "ok", "deleted": deleted}
+
+@app.get("/api/history/export")
+async def export_history(format: str = "json"):
+    """Exporte l'historique complet"""
+    from core.history import command_history
+    from fastapi.responses import Response
+    
+    if format == "json":
+        data = command_history.export_history()
+        return Response(
+            content=data,
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=history_export.json"}
+        )
+    else:
+        raise HTTPException(status_code=400, detail="Format non supporté (json uniquement)")
+
+# ============================================================================
+# ROUTES - Templates de workflows personnalisés
+# ============================================================================
+
+@app.get("/api/templates")
+async def list_workflow_templates(
+    author: str = None,
+    tags: str = None,
+    target_type: str = None,
+    is_public: bool = None,
+    search: str = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """Liste les templates de workflows"""
+    from workflows.templates import template_manager
+    
+    tag_list = tags.split(",") if tags else None
+    templates = template_manager.list_templates(
+        author=author,
+        tags=tag_list,
+        target_type=target_type,
+        is_public=is_public,
+        search=search,
+        limit=limit,
+        offset=offset
+    )
+    
+    return {
+        "status": "ok",
+        "count": len(templates),
+        "templates": [
+            {
+                "id": t.id,
+                "name": t.name,
+                "description": t.description,
+                "author": t.author,
+                "target_types": t.target_types,
+                "step_count": len(t.steps),
+                "auto_chain": t.auto_chain,
+                "tags": t.tags,
+                "is_public": t.is_public,
+                "usage_count": t.usage_count,
+                "rating": t.rating
+            } for t in templates
+        ]
+    }
+
+@app.post("/api/templates")
+async def create_workflow_template(template: Dict[str, Any] = Body(...)):
+    """Crée un nouveau template de workflow"""
+    from workflows.templates import template_manager
+    
+    try:
+        template_id = template_manager.create_template(template)
+        return {"status": "ok", "template_id": template_id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/templates/popular")
+async def get_popular_templates(limit: int = 10):
+    """Récupère les templates les plus populaires"""
+    from workflows.templates import template_manager
+    
+    templates = template_manager.get_popular_templates(limit)
+    return {
+        "status": "ok",
+        "templates": [
+            {
+                "id": t.id,
+                "name": t.name,
+                "description": t.description,
+                "usage_count": t.usage_count,
+                "rating": t.rating,
+                "tags": t.tags
+            } for t in templates
+        ]
+    }
+
+@app.get("/api/templates/stats")
+async def get_templates_stats():
+    """Récupère les statistiques sur les templates"""
+    from workflows.templates import template_manager
+    return {"status": "ok", **template_manager.get_statistics()}
+
+@app.get("/api/templates/{template_id}")
+async def get_workflow_template(template_id: int):
+    """Récupère un template par son ID"""
+    from workflows.templates import template_manager
+    
+    template = template_manager.get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template non trouvé")
+    
+    return {
+        "status": "ok",
+        "template": {
+            "id": template.id,
+            "name": template.name,
+            "description": template.description,
+            "author": template.author,
+            "target_types": template.target_types,
+            "steps": template.steps,
+            "auto_chain": template.auto_chain,
+            "tags": template.tags,
+            "is_public": template.is_public,
+            "created_at": template.created_at,
+            "updated_at": template.updated_at,
+            "usage_count": template.usage_count,
+            "rating": template.rating
+        }
+    }
+
+@app.put("/api/templates/{template_id}")
+async def update_workflow_template(template_id: int, updates: Dict[str, Any] = Body(...)):
+    """Met à jour un template"""
+    from workflows.templates import template_manager
+    
+    if not template_manager.update_template(template_id, updates):
+        raise HTTPException(status_code=404, detail="Template non trouvé")
+    
+    return {"status": "ok", "message": "Template mis à jour"}
+
+@app.delete("/api/templates/{template_id}")
+async def delete_workflow_template(template_id: int):
+    """Supprime un template"""
+    from workflows.templates import template_manager
+    
+    if not template_manager.delete_template(template_id):
+        raise HTTPException(status_code=404, detail="Template non trouvé")
+    
+    return {"status": "ok", "message": "Template supprimé"}
+
+@app.post("/api/templates/{template_id}/clone")
+async def clone_workflow_template(template_id: int, new_name: str, author: str = "user"):
+    """Clone un template existant"""
+    from workflows.templates import template_manager
+    
+    try:
+        new_id = template_manager.clone_template(template_id, new_name, author)
+        return {"status": "ok", "new_template_id": new_id}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/templates/{template_id}/export")
+async def export_workflow_template(template_id: int):
+    """Exporte un template en JSON"""
+    from workflows.templates import template_manager
+    from fastapi.responses import Response
+    
+    try:
+        json_data = template_manager.export_template(template_id)
+        return Response(
+            content=json_data,
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=template_{template_id}.json"}
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/api/templates/import")
+async def import_workflow_template(json_data: str = Body(..., embed=True), author: str = "user"):
+    """Importe un template depuis JSON"""
+    from workflows.templates import template_manager
+    
+    try:
+        template_id = template_manager.import_template(json_data, author)
+        return {"status": "ok", "template_id": template_id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/templates/{template_id}/rate")
+async def rate_workflow_template(template_id: int, rating: float = Body(..., embed=True)):
+    """Note un template (0-5)"""
+    from workflows.templates import template_manager
+    
+    if rating < 0 or rating > 5:
+        raise HTTPException(status_code=400, detail="Rating doit être entre 0 et 5")
+    
+    template_manager.rate_template(template_id, rating)
+    return {"status": "ok", "message": f"Template noté: {rating}/5"}
+
+@app.post("/api/templates/{template_id}/execute")
+async def execute_template_workflow(
+    template_id: int,
+    target: Dict[str, Any] = Body(...),
+    background_tasks: BackgroundTasks = None
+):
+    """Exécute un workflow depuis un template"""
+    from workflows.templates import template_manager
+    from workflows.engine import WorkflowEngine
+    
+    template = template_manager.get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template non trouvé")
+    
+    # Incrémenter le compteur d'utilisation
+    template_manager.increment_usage(template_id)
+    
+    # Préparer le workflow pour exécution
+    workflow_engine = WorkflowEngine()
+    
+    # Ajouter le template comme workflow temporaire
+    temp_workflow_id = f"template_{template_id}"
+    workflow_engine.workflows[temp_workflow_id] = {
+        "id": temp_workflow_id,
+        "name": template.name,
+        "description": template.description,
+        "target_types": template.target_types,
+        "steps": template.steps,
+        "auto_chain": template.auto_chain
+    }
+    
+    # Exécuter en arrière-plan
+    if background_tasks:
+        background_tasks.add_task(
+            workflow_engine.execute,
+            temp_workflow_id,
+            target,
+            {},
+            ws_manager,
+            current_session.get("results", {})
+        )
+    
+    return {
+        "status": "ok",
+        "message": f"Workflow '{template.name}' démarré",
+        "template_id": template_id
+    }
+
+# ============================================================================
+# ROUTES - Vérification des outils
+# ============================================================================
+
+@app.get("/api/tools/status")
+async def get_tools_status():
+    """Vérifie la disponibilité de tous les outils configurés"""
+    from core.executor import executor
+    
+    available_tools = executor.get_available_tools()
+    missing_tools = executor.get_missing_tools()
+    
+    return {
+        "status": "ok" if not missing_tools else "warning",
+        "total_tools": len(available_tools),
+        "available_count": sum(1 for v in available_tools.values() if v),
+        "missing_count": len(missing_tools),
+        "tools": available_tools,
+        "missing": missing_tools
+    }
+
+
+@app.get("/api/tools/check/{tool_name}")
+async def check_single_tool(tool_name: str):
+    """Vérifie si un outil spécifique est disponible"""
+    from core.executor import executor
+    
+    is_available = executor.check_tool_available(tool_name)
+    
+    return {
+        "tool": tool_name,
+        "available": is_available,
+        "message": f"{tool_name} est disponible" if is_available else f"{tool_name} n'est pas installé"
+    }
+
 
 # ============================================================================
 # WebSocket - Communication temps réel

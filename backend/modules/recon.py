@@ -9,19 +9,40 @@ from datetime import datetime
 
 from core.executor import CommandExecutor, escape_shell_arg
 from core.config import settings
+from core.cache import cache
 from models.schemas import ActionResult, ActionStatus
+
 
 class ReconModule:
     """Module de reconnaissance"""
     
     def __init__(self):
         self.executor = CommandExecutor()
+        self.use_cache = True  # Activer/désactiver le cache
+    
+    def _check_cache(self, action: str, target: str, options: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
+        """Vérifie si un résultat est en cache"""
+        if not self.use_cache:
+            return None
+        return cache.get(action, target, options)
+    
+    def _save_cache(self, action: str, target: str, result: Dict[str, Any], options: Dict[str, Any] = None):
+        """Sauvegarde un résultat en cache"""
+        if self.use_cache and result.get("status") == "completed":
+            cache.set(action, target, result, options)
     
     async def nmap_quick(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Scan Nmap rapide - Top 1000 ports
         """
         options = options or {}
+        
+        # Vérifier le cache (sauf si force_refresh)
+        if not options.get("force_refresh"):
+            cached = self._check_cache("nmap_quick", target, options)
+            if cached:
+                return cached
+        
         target_safe = escape_shell_arg(target)
         
         # Construire la commande
@@ -31,7 +52,7 @@ class ReconModule:
         
         parsed = self._parse_nmap_xml(result.stdout) if result.return_code == 0 else None
         
-        return {
+        response = {
             "action": "nmap_quick",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
@@ -42,12 +63,24 @@ class ReconModule:
             "timestamp": result.timestamp,
             "parsed_data": parsed
         }
+        
+        # Sauvegarder en cache
+        self._save_cache("nmap_quick", target, response, options)
+        
+        return response
     
     async def nmap_full(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Scan Nmap complet - Tous les ports
         """
         options = options or {}
+        
+        # Vérifier le cache
+        if not options.get("force_refresh"):
+            cached = self._check_cache("nmap_full", target, options)
+            if cached:
+                return cached
+        
         target_safe = escape_shell_arg(target)
         
         cmd = f"nmap -sV -sC -p- -T4 -oX - {target_safe}"
@@ -252,7 +285,7 @@ class ReconModule:
         }
     
     def _parse_nmap_xml(self, xml_output: str) -> Optional[Dict[str, Any]]:
-        """Parse la sortie XML de Nmap"""
+        """Parse la sortie XML de Nmap avec extraction complète"""
         try:
             # Trouver le début du XML
             xml_start = xml_output.find('<?xml')
@@ -264,7 +297,14 @@ class ReconModule:
             
             results = {
                 "hosts": [],
-                "scan_info": {}
+                "scan_info": {},
+                "vulnerabilities": [],
+                "statistics": {
+                    "total_hosts": 0,
+                    "hosts_up": 0,
+                    "total_ports": 0,
+                    "open_ports": 0
+                }
             }
             
             # Infos du scan
@@ -276,6 +316,14 @@ class ReconModule:
                     "services": scaninfo.get('services')
                 }
             
+            # Statistiques globales
+            runstats = root.find('runstats')
+            if runstats is not None:
+                hosts_stat = runstats.find('hosts')
+                if hosts_stat is not None:
+                    results["statistics"]["total_hosts"] = int(hosts_stat.get('total', 0))
+                    results["statistics"]["hosts_up"] = int(hosts_stat.get('up', 0))
+            
             # Hosts
             for host in root.findall('host'):
                 host_data = {
@@ -283,7 +331,11 @@ class ReconModule:
                     "hostnames": [],
                     "ports": [],
                     "os": None,
-                    "state": "unknown"
+                    "os_matches": [],
+                    "state": "unknown",
+                    "uptime": None,
+                    "distance": None,
+                    "host_scripts": []
                 }
                 
                 # État
@@ -293,16 +345,36 @@ class ReconModule:
                 
                 # Adresses
                 for addr in host.findall('address'):
-                    host_data["addresses"].append({
+                    addr_data = {
                         "addr": addr.get('addr'),
                         "type": addr.get('addrtype')
-                    })
+                    }
+                    # MAC vendor
+                    if addr.get('vendor'):
+                        addr_data["vendor"] = addr.get('vendor')
+                    host_data["addresses"].append(addr_data)
                 
                 # Hostnames
                 hostnames = host.find('hostnames')
                 if hostnames is not None:
                     for hostname in hostnames.findall('hostname'):
-                        host_data["hostnames"].append(hostname.get('name'))
+                        host_data["hostnames"].append({
+                            "name": hostname.get('name'),
+                            "type": hostname.get('type', 'unknown')
+                        })
+                
+                # Uptime
+                uptime = host.find('uptime')
+                if uptime is not None:
+                    host_data["uptime"] = {
+                        "seconds": uptime.get('seconds'),
+                        "lastboot": uptime.get('lastboot')
+                    }
+                
+                # Distance (hops)
+                distance = host.find('distance')
+                if distance is not None:
+                    host_data["distance"] = int(distance.get('value', 0))
                 
                 # Ports
                 ports = host.find('ports')
@@ -312,40 +384,141 @@ class ReconModule:
                             "port": int(port.get('portid')),
                             "protocol": port.get('protocol'),
                             "state": "unknown",
+                            "reason": None,
                             "service": "unknown",
+                            "product": None,
                             "version": None,
-                            "scripts": []
+                            "extrainfo": None,
+                            "cpe": [],
+                            "scripts": [],
+                            "vulnerabilities": []
                         }
                         
                         state = port.find('state')
                         if state is not None:
                             port_data["state"] = state.get('state')
+                            port_data["reason"] = state.get('reason')
+                            if port_data["state"] == "open":
+                                results["statistics"]["open_ports"] += 1
+                        
+                        results["statistics"]["total_ports"] += 1
                         
                         service = port.find('service')
                         if service is not None:
                             port_data["service"] = service.get('name', 'unknown')
-                            port_data["version"] = service.get('product', '')
-                            if service.get('version'):
-                                port_data["version"] += f" {service.get('version')}"
+                            port_data["product"] = service.get('product')
+                            port_data["version"] = service.get('version')
+                            port_data["extrainfo"] = service.get('extrainfo')
+                            port_data["tunnel"] = service.get('tunnel')  # ssl
+                            
+                            # CPE (Common Platform Enumeration)
+                            for cpe in service.findall('cpe'):
+                                if cpe.text:
+                                    port_data["cpe"].append(cpe.text)
                         
-                        # Scripts NSE
+                        # Scripts NSE avec détection de vulnérabilités
                         for script in port.findall('script'):
-                            port_data["scripts"].append({
-                                "id": script.get('id'),
-                                "output": script.get('output')
-                            })
+                            script_id = script.get('id', '')
+                            script_output = script.get('output', '')
+                            
+                            script_data = {
+                                "id": script_id,
+                                "output": script_output
+                            }
+                            
+                            # Extraire les tables de données des scripts
+                            tables = []
+                            for table in script.findall('.//table'):
+                                table_data = {}
+                                for elem in table.findall('elem'):
+                                    if elem.get('key') and elem.text:
+                                        table_data[elem.get('key')] = elem.text
+                                if table_data:
+                                    tables.append(table_data)
+                            if tables:
+                                script_data["data"] = tables
+                            
+                            port_data["scripts"].append(script_data)
+                            
+                            # Détecter les vulnérabilités
+                            if any(vuln_kw in script_id.lower() for vuln_kw in ['vuln', 'exploit', 'cve']):
+                                # Extraire les CVE
+                                cves = re.findall(r'CVE-\d{4}-\d+', script_output, re.IGNORECASE)
+                                vuln_data = {
+                                    "script": script_id,
+                                    "port": port_data["port"],
+                                    "service": port_data["service"],
+                                    "output": script_output[:500],
+                                    "cves": list(set(cves))
+                                }
+                                
+                                # Déterminer la sévérité
+                                if 'VULNERABLE' in script_output.upper():
+                                    vuln_data["status"] = "vulnerable"
+                                    if cves:
+                                        vuln_data["severity"] = "high"
+                                    else:
+                                        vuln_data["severity"] = "medium"
+                                elif 'NOT VULNERABLE' in script_output.upper():
+                                    vuln_data["status"] = "not_vulnerable"
+                                    vuln_data["severity"] = "info"
+                                else:
+                                    vuln_data["status"] = "unknown"
+                                    vuln_data["severity"] = "low"
+                                
+                                port_data["vulnerabilities"].append(vuln_data)
+                                results["vulnerabilities"].append(vuln_data)
                         
                         host_data["ports"].append(port_data)
                 
-                # OS Detection
+                # OS Detection (tous les matchs)
                 os_elem = host.find('os')
                 if os_elem is not None:
-                    osmatch = os_elem.find('osmatch')
-                    if osmatch is not None:
-                        host_data["os"] = {
+                    for osmatch in os_elem.findall('osmatch'):
+                        os_data = {
                             "name": osmatch.get('name'),
-                            "accuracy": osmatch.get('accuracy')
+                            "accuracy": int(osmatch.get('accuracy', 0)),
+                            "line": osmatch.get('line'),
+                            "cpe": []
                         }
+                        
+                        # OS CPE et classes
+                        for osclass in osmatch.findall('osclass'):
+                            os_data["type"] = osclass.get('type')
+                            os_data["vendor"] = osclass.get('vendor')
+                            os_data["osfamily"] = osclass.get('osfamily')
+                            os_data["osgen"] = osclass.get('osgen')
+                            
+                            for cpe in osclass.findall('cpe'):
+                                if cpe.text:
+                                    os_data["cpe"].append(cpe.text)
+                        
+                        host_data["os_matches"].append(os_data)
+                    
+                    # Meilleur match comme OS principal
+                    if host_data["os_matches"]:
+                        best_match = max(host_data["os_matches"], key=lambda x: x["accuracy"])
+                        host_data["os"] = best_match
+                
+                # Scripts au niveau host (smb-os-discovery, etc.)
+                hostscript = host.find('hostscript')
+                if hostscript is not None:
+                    for script in hostscript.findall('script'):
+                        host_data["host_scripts"].append({
+                            "id": script.get('id'),
+                            "output": script.get('output')
+                        })
+                        
+                        # Extraire les infos OS des scripts
+                        if script.get('id') == 'smb-os-discovery':
+                            output = script.get('output', '')
+                            os_match = re.search(r'OS:\s*(.+)', output)
+                            if os_match and not host_data["os"]:
+                                host_data["os"] = {
+                                    "name": os_match.group(1).strip(),
+                                    "accuracy": 90,
+                                    "source": "smb-os-discovery"
+                                }
                 
                 results["hosts"].append(host_data)
             

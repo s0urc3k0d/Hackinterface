@@ -99,11 +99,15 @@ class WebEnumModule:
         extensions = options.get("extensions", "")
         threads = options.get("threads", 50)
         
-        cmd = f"ffuf -u {target_safe} -w {wordlist} -t {threads} -mc all -fc 404"
+        # Utiliser -o pour la sortie JSON
+        cmd = f"ffuf -u {target_safe} -w {wordlist} -t {threads} -mc all -fc 404 -of json -o /tmp/ffuf_output.json"
         if extensions:
             cmd += f" -e {extensions}"
         
         result = await self.executor.run(cmd, timeout=1800)
+        
+        # Parser le JSON de sortie
+        parsed = self._parse_ffuf(result.return_code)
         
         return {
             "action": "ffuf",
@@ -114,8 +118,56 @@ class WebEnumModule:
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
             "timestamp": result.timestamp,
-            "parsed_data": None  # TODO: parser
+            "parsed_data": parsed
         }
+    
+    def _parse_ffuf(self, return_code: int) -> Optional[Dict[str, Any]]:
+        """Parse la sortie JSON de FFUF"""
+        import json
+        import os
+        
+        output_file = "/tmp/ffuf_output.json"
+        if not os.path.exists(output_file):
+            return None
+        
+        try:
+            with open(output_file, 'r') as f:
+                data = json.load(f)
+            
+            findings = []
+            for result in data.get("results", []):
+                findings.append({
+                    "url": result.get("url", ""),
+                    "status": result.get("status", 0),
+                    "length": result.get("length", 0),
+                    "words": result.get("words", 0),
+                    "lines": result.get("lines", 0),
+                    "content_type": result.get("content-type", ""),
+                    "input": result.get("input", {}).get("FUZZ", "")
+                })
+            
+            # Trier par status code
+            findings.sort(key=lambda x: (x["status"], -x["length"]))
+            
+            # Grouper par status code
+            by_status = {}
+            for f in findings:
+                status = f["status"]
+                if status not in by_status:
+                    by_status[status] = []
+                by_status[status].append(f)
+            
+            # Nettoyer le fichier temporaire
+            os.remove(output_file)
+            
+            return {
+                "findings": findings,
+                "count": len(findings),
+                "by_status": by_status,
+                "config": data.get("config", {})
+            }
+        except Exception as e:
+            return {"error": str(e)}
     
     async def nikto(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -331,8 +383,11 @@ class WebEnumModule:
             "count": len(findings)
         }
     
-    def _parse_whatweb(self, output: str) -> Dict[str, Any]:
-        """Parse la sortie de WhatWeb"""
+    def _parse_whatweb(self, result: dict) -> Dict[str, Any]:
+        """Parse la sortie de WhatWeb avec détection CMS/frameworks"""
+        # Extraire la sortie texte du résultat
+        output = result.get("output", "") if isinstance(result, dict) else str(result)
+        
         technologies = []
         
         # Extraire les technologies entre crochets
@@ -340,8 +395,99 @@ class WebEnumModule:
         for match in matches:
             technologies.append(match)
         
+        # Détection des CMS
+        output_lower = output.lower()
+        cms = None
+        cms_version = None
+        
+        cms_patterns = {
+            "wordpress": [r'wordpress\[?([\d.]+)?\]?', r'wp-content', r'wp-includes'],
+            "joomla": [r'joomla\[?([\d.]+)?\]?', r'/administrator', r'joomla!'],
+            "drupal": [r'drupal\[?([\d.]+)?\]?', r'sites/default', r'drupal.org'],
+            "magento": [r'magento\[?([\d.]+)?\]?', r'mage', r'/skin/frontend'],
+            "prestashop": [r'prestashop\[?([\d.]+)?\]?', r'prestashop'],
+            "typo3": [r'typo3\[?([\d.]+)?\]?', r'typo3'],
+            "shopify": [r'shopify', r'cdn.shopify'],
+            "wix": [r'wix\.com', r'wixstatic'],
+            "squarespace": [r'squarespace', r'sqsp'],
+        }
+        
+        for cms_name, patterns in cms_patterns.items():
+            for pattern in patterns:
+                match = re.search(pattern, output_lower)
+                if match:
+                    cms = cms_name
+                    if match.groups():
+                        cms_version = match.group(1)
+                    break
+            if cms:
+                break
+        
+        # Détection des frameworks
+        framework = None
+        framework_patterns = {
+            "laravel": [r'laravel', r'x-powered-by.*laravel'],
+            "django": [r'django', r'csrfmiddlewaretoken'],
+            "rails": [r'ruby on rails', r'x-powered-by.*phusion', r'rails'],
+            "express": [r'express', r'x-powered-by.*express'],
+            "flask": [r'flask', r'werkzeug'],
+            "spring": [r'spring', r'x-application-context'],
+            "asp.net": [r'asp\.net', r'x-aspnet-version', r'__viewstate'],
+            "nextjs": [r'next\.js', r'_next/static'],
+            "nuxt": [r'nuxt', r'__nuxt'],
+            "angular": [r'angular', r'ng-version'],
+            "react": [r'react', r'_reactroot'],
+            "vue": [r'vue\.js', r'vue@'],
+        }
+        
+        for fw_name, patterns in framework_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, output_lower):
+                    framework = fw_name
+                    break
+            if framework:
+                break
+        
+        # Détection serveur web
+        server = None
+        server_patterns = {
+            "nginx": r'nginx[/\s]?([\d.]+)?',
+            "apache": r'apache[/\s]?([\d.]+)?',
+            "iis": r'microsoft-iis[/\s]?([\d.]+)?',
+            "lighttpd": r'lighttpd[/\s]?([\d.]+)?',
+            "caddy": r'caddy',
+            "tomcat": r'tomcat[/\s]?([\d.]+)?',
+        }
+        
+        for srv_name, pattern in server_patterns.items():
+            match = re.search(pattern, output_lower)
+            if match:
+                server = srv_name
+                break
+        
+        # Détection langage
+        language = None
+        lang_patterns = {
+            "php": r'php[/\s]?([\d.]+)?',
+            "python": r'python[/\s]?([\d.]+)?',
+            "ruby": r'ruby[/\s]?([\d.]+)?',
+            "java": r'java|jsp',
+            "node": r'node\.?js',
+            "perl": r'perl',
+        }
+        
+        for lang_name, pattern in lang_patterns.items():
+            if re.search(pattern, output_lower):
+                language = lang_name
+                break
+        
         return {
             "technologies": technologies,
+            "cms": cms,
+            "cms_version": cms_version,
+            "framework": framework,
+            "server": server,
+            "language": language,
             "raw": output
         }
     

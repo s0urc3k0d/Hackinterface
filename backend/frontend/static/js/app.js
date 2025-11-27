@@ -20,6 +20,163 @@ let vulnSeverityChart = null;
 let portsChart = null;
 let discoveryChart = null;
 
+// Configuration notifications
+let notificationsEnabled = false;
+let notificationPermission = 'default';
+
+// ============================================
+// Système de Notifications Navigateur
+// ============================================
+
+class NotificationManager {
+    constructor() {
+        this.permission = Notification.permission || 'default';
+        this.enabled = localStorage.getItem('notifications_enabled') === 'true';
+        this.sound = localStorage.getItem('notification_sound') !== 'false';
+        this.soundAudio = null;
+        this.init();
+    }
+    
+    init() {
+        // Créer un son de notification (optionnel)
+        try {
+            this.soundAudio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleTPYoa2zqYIzHVSLqLzPtJNbKzNhj6e3zaOLYC8kSXuYrcjCpYxdLSFBa4yfr762qpFnNh48YImdr7a0rZ9zRyktUHqXp7GxrKaEXDolN1p9l6OwsKylhmE/JjJXd5Sfq66qqI1oRCstTnWToauuq6iPbUksMkxyl6CprauqkXBNLzFJb5SeoKiqrJNzUDEuRmqRm52go6mXd1QyLEJmjZibnqGnnXtXNC1AYYqVmJudn59+WjYtPl6Gk5aYmp2dfV05LjxbgpGUlpmcnIBfOy87WX6PkpWXmpp/YjwuOVZ7jJCTlZmZf2U+LjdUeImNkZOXmIFnQC01UXWGio6Rk5WAakIuNE9yg4iMj5KUgm1FLjJNcIGFio2PlIOBgjMvJVJ5iIuNjpCQfXFLNjdEbYKHi4yNjX9yTTc5Q2qAhomKjIx/dFM6OUBmfIOHiYuLgXdXPTk9Y3uBhYeJin94Wz85O2B4f4OGh4l/emBAOjlddHyBhIaHfntjQzs4W3J6foKEhn18ZkY7N1hwd3uAgYSCfWhIQDdWbXV4fn+AgXpqSkI3U2pzdn19f395bE1FN1FobnR6e31+eW9QRzhPZWxydHh6e3ZwVEo5TWJqcHJ1eHl0clhMOkpgZ25wb3N3dnJbTjtIXWVrbnBzdXRxXFA+RlpjamxucHNyb19UQENXYGdqbG9wcGxgVkNBVV5laGprbmxtYllGQFNcY2ZoamxtamRcST9QWmBjZmhqa2djXkxATldcYWNlZ2hnYV9QQU1UWV5hY2VmZGBbUkJLUldcXmFjY2JeWFNFSE9UWVteYGFfXFZRR0VNU1dbXV5gXltTTUZDSlFVWFpcXV1ZUFJHR0hNUlVXWVxbV09MSUZGSlBTV1lZW1lTTEpISEZJT1NVV1lZVlBNTEhGRUlMUVNWV1dUUE1MSUVFRkhMT1FTVVRST05LSEVDREZJTVBSU1JQT0xKSEVCQkRGSUxPUVFQT0xKSUdEQkFCREZJTE5PUE5NSkpIREJAQEFDRkhKTE1NT0xKSUdEQkBAQEFDRUdJSktMTEpJR0VCQD8/QEFCQ0VGR0hJSEhHRkVDQkBAPz9AQEFCREVGRkdHRkZFRENCQD8+Pz4/P0ACAFBQT05NTEtKSUhHRkVEQ0JBQD8+PT08Ozo=');
+        } catch (e) {
+            console.log('Audio notification non supporté');
+        }
+    }
+    
+    async requestPermission() {
+        if (!('Notification' in window)) {
+            console.log('Ce navigateur ne supporte pas les notifications');
+            return false;
+        }
+        
+        if (Notification.permission === 'granted') {
+            this.permission = 'granted';
+            this.enabled = true;
+            localStorage.setItem('notifications_enabled', 'true');
+            return true;
+        }
+        
+        if (Notification.permission !== 'denied') {
+            const permission = await Notification.requestPermission();
+            this.permission = permission;
+            if (permission === 'granted') {
+                this.enabled = true;
+                localStorage.setItem('notifications_enabled', 'true');
+                this.show('Notifications activées', 'Vous recevrez des notifications pour les événements importants.', 'info');
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    show(title, body, type = 'info', options = {}) {
+        // Toujours afficher une notification dans l'interface
+        notify(type, `${title}: ${body}`);
+        
+        // Si les notifications navigateur sont activées
+        if (this.enabled && Notification.permission === 'granted') {
+            const icons = {
+                success: '✅',
+                error: '❌',
+                warning: '⚠️',
+                info: 'ℹ️'
+            };
+            
+            const notification = new Notification(`${icons[type] || ''} ${title}`, {
+                body: body,
+                icon: options.icon || '/static/img/icon.png',
+                badge: options.badge,
+                tag: options.tag || `hackinterface-${Date.now()}`,
+                requireInteraction: options.requireInteraction || type === 'error',
+                silent: !this.sound
+            });
+            
+            // Jouer le son si activé
+            if (this.sound && this.soundAudio) {
+                this.soundAudio.play().catch(() => {});
+            }
+            
+            // Auto-close après 5 secondes (sauf erreurs)
+            if (type !== 'error') {
+                setTimeout(() => notification.close(), 5000);
+            }
+            
+            // Callback au clic
+            notification.onclick = () => {
+                window.focus();
+                notification.close();
+                if (options.onClick) options.onClick();
+            };
+            
+            return notification;
+        }
+        
+        return null;
+    }
+    
+    // Méthodes de raccourci
+    success(title, body, options = {}) {
+        return this.show(title, body, 'success', options);
+    }
+    
+    error(title, body, options = {}) {
+        return this.show(title, body, 'error', { ...options, requireInteraction: true });
+    }
+    
+    warning(title, body, options = {}) {
+        return this.show(title, body, 'warning', options);
+    }
+    
+    info(title, body, options = {}) {
+        return this.show(title, body, 'info', options);
+    }
+    
+    // Notifications spécifiques aux événements
+    actionCompleted(action, target) {
+        this.success('Action terminée', `${action} sur ${target} complétée avec succès`);
+    }
+    
+    actionError(action, error) {
+        this.error('Erreur action', `${action} a échoué: ${error}`);
+    }
+    
+    workflowCompleted(workflowName) {
+        this.success('Workflow terminé', `${workflowName} terminé avec succès`, {
+            requireInteraction: true
+        });
+    }
+    
+    vulnerabilityFound(severity, count) {
+        const severityColors = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' };
+        this.warning('Vulnérabilités détectées', 
+            `${severityColors[severity] || ''} ${count} vulnérabilité(s) ${severity} trouvée(s)`,
+            { requireInteraction: severity === 'critical' }
+        );
+    }
+    
+    toggleSound() {
+        this.sound = !this.sound;
+        localStorage.setItem('notification_sound', this.sound.toString());
+        return this.sound;
+    }
+    
+    getStatus() {
+        return {
+            supported: 'Notification' in window,
+            permission: this.permission,
+            enabled: this.enabled,
+            sound: this.sound
+        };
+    }
+}
+
+// Instance globale du gestionnaire de notifications
+const notificationManager = new NotificationManager();
+
 // ============================================
 // Initialisation
 // ============================================
@@ -30,7 +187,70 @@ document.addEventListener('DOMContentLoaded', () => {
     initVpnUpload();
     loadInitialData();
     initTerminalToggle();
+    initNotifications();
 });
+
+// ============================================
+// Initialisation des Notifications
+// ============================================
+
+function initNotifications() {
+    // Vérifier si les notifications sont déjà autorisées
+    if (notificationManager.permission === 'granted' && notificationManager.enabled) {
+        updateNotificationButton(true);
+    }
+    
+    // Ajouter le bouton de notification s'il n'existe pas
+    const header = document.querySelector('.header-right') || document.querySelector('.header');
+    if (header && !document.getElementById('notification-btn')) {
+        const notifBtn = document.createElement('button');
+        notifBtn.id = 'notification-btn';
+        notifBtn.className = 'btn btn-secondary btn-sm';
+        notifBtn.innerHTML = '🔔 Notifications';
+        notifBtn.onclick = toggleNotifications;
+        notifBtn.title = 'Activer les notifications navigateur';
+        header.insertBefore(notifBtn, header.firstChild);
+    }
+}
+
+async function toggleNotifications() {
+    const status = notificationManager.getStatus();
+    
+    if (!status.supported) {
+        notify('warning', 'Les notifications ne sont pas supportées par votre navigateur');
+        return;
+    }
+    
+    if (status.enabled) {
+        // Désactiver
+        notificationManager.enabled = false;
+        localStorage.setItem('notifications_enabled', 'false');
+        updateNotificationButton(false);
+        notify('info', 'Notifications désactivées');
+    } else {
+        // Demander la permission
+        const granted = await notificationManager.requestPermission();
+        updateNotificationButton(granted);
+        if (!granted) {
+            notify('warning', 'Permission de notification refusée');
+        }
+    }
+}
+
+function updateNotificationButton(enabled) {
+    const btn = document.getElementById('notification-btn');
+    if (btn) {
+        if (enabled) {
+            btn.innerHTML = '🔔 Notifs: ON';
+            btn.classList.remove('btn-secondary');
+            btn.classList.add('btn-success');
+        } else {
+            btn.innerHTML = '🔕 Notifs: OFF';
+            btn.classList.remove('btn-success');
+            btn.classList.add('btn-secondary');
+        }
+    }
+}
 
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -78,9 +298,11 @@ function handleActionUpdate(data) {
     
     if (data.status === 'completed') {
         notify('success', `Action ${data.action} terminée`);
+        notificationManager.actionCompleted(data.action, data.target_id || 'cible');
         loadResults();
     } else if (data.status === 'error') {
         notify('error', `Erreur: ${data.action}`);
+        notificationManager.actionError(data.action, data.error || 'Erreur inconnue');
     }
 }
 
@@ -94,6 +316,7 @@ function handleWorkflowUpdate(data) {
         progressDiv.style.display = 'block';
         progressBar.style.width = '0%';
         workflowLog.innerHTML = '';
+        notificationManager.info('Workflow démarré', `Exécution en cours...`);
     } else if (data.status === 'running') {
         const progress = (data.current_step_num / data.total_steps) * 100;
         progressBar.style.width = `${progress}%`;
@@ -104,8 +327,14 @@ function handleWorkflowUpdate(data) {
         progressBar.style.width = '100%';
         statusText.textContent = 'Workflow terminé !';
         notify('success', 'Workflow terminé avec succès');
+        notificationManager.workflowCompleted(data.workflow_id || 'Workflow');
         loadResults();
         updateStats();
+    } else if (data.status === 'cancelled') {
+        progressBar.style.width = '0%';
+        statusText.textContent = 'Workflow annulé';
+        notify('warning', 'Workflow annulé');
+        notificationManager.warning('Workflow annulé', 'Le workflow a été interrompu par l\'utilisateur');
     }
 }
 
@@ -1388,5 +1617,235 @@ document.addEventListener('DOMContentLoaded', () => {
             
             e.target.value = '';
         });
+    }
+});
+
+// ============================================
+// PWA - Progressive Web App Support
+// ============================================
+
+class PWAManager {
+    constructor() {
+        this.deferredPrompt = null;
+        this.isInstalled = false;
+        this.isOnline = navigator.onLine;
+        this.init();
+    }
+    
+    async init() {
+        // Enregistrer le Service Worker
+        if ('serviceWorker' in navigator) {
+            try {
+                const registration = await navigator.serviceWorker.register('/sw.js', {
+                    scope: '/'
+                });
+                
+                console.log('[PWA] Service Worker enregistré:', registration.scope);
+                
+                // Vérifier les mises à jour
+                registration.addEventListener('updatefound', () => {
+                    const newWorker = registration.installing;
+                    newWorker.addEventListener('statechange', () => {
+                        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                            this.showUpdateNotification();
+                        }
+                    });
+                });
+                
+                // Écouter les messages du Service Worker
+                navigator.serviceWorker.addEventListener('message', (event) => {
+                    this.handleServiceWorkerMessage(event.data);
+                });
+                
+            } catch (error) {
+                console.error('[PWA] Erreur enregistrement SW:', error);
+            }
+        }
+        
+        // Écouter l'événement beforeinstallprompt
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            this.deferredPrompt = e;
+            this.showInstallBanner();
+        });
+        
+        // Détecter si déjà installé
+        window.addEventListener('appinstalled', () => {
+            this.isInstalled = true;
+            this.hideInstallBanner();
+            notify('success', 'HackInterface installé avec succès!');
+        });
+        
+        // Gérer le mode hors-ligne
+        window.addEventListener('online', () => this.updateOnlineStatus(true));
+        window.addEventListener('offline', () => this.updateOnlineStatus(false));
+        
+        // Configurer les boutons
+        this.setupInstallButtons();
+    }
+    
+    showInstallBanner() {
+        const banner = document.getElementById('pwa-install-banner');
+        if (banner && !this.isInstalled) {
+            // Attendre un peu avant d'afficher
+            setTimeout(() => {
+                banner.classList.add('show');
+            }, 3000);
+        }
+    }
+    
+    hideInstallBanner() {
+        const banner = document.getElementById('pwa-install-banner');
+        if (banner) {
+            banner.classList.remove('show');
+        }
+    }
+    
+    setupInstallButtons() {
+        const installBtn = document.getElementById('pwa-install-btn');
+        const closeBtn = document.getElementById('pwa-close-btn');
+        
+        if (installBtn) {
+            installBtn.addEventListener('click', () => this.installPWA());
+        }
+        
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => {
+                this.hideInstallBanner();
+                // Ne plus afficher pendant cette session
+                sessionStorage.setItem('pwa-banner-dismissed', 'true');
+            });
+        }
+    }
+    
+    async installPWA() {
+        if (!this.deferredPrompt) {
+            console.log('[PWA] Pas de prompt disponible');
+            return;
+        }
+        
+        this.hideInstallBanner();
+        
+        // Afficher le prompt d'installation
+        this.deferredPrompt.prompt();
+        
+        const { outcome } = await this.deferredPrompt.userChoice;
+        console.log('[PWA] Choix utilisateur:', outcome);
+        
+        this.deferredPrompt = null;
+        
+        if (outcome === 'accepted') {
+            notify('success', 'Installation en cours...');
+        }
+    }
+    
+    updateOnlineStatus(online) {
+        this.isOnline = online;
+        const indicator = document.getElementById('offline-indicator');
+        
+        if (indicator) {
+            if (online) {
+                indicator.classList.remove('show');
+                notify('success', 'Connexion rétablie');
+                // Synchroniser les données en attente
+                this.syncPendingData();
+            } else {
+                indicator.classList.add('show');
+                notify('warning', 'Mode hors-ligne activé');
+            }
+        }
+    }
+    
+    async syncPendingData() {
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({
+                type: 'SYNC_NOW'
+            });
+        }
+    }
+    
+    handleServiceWorkerMessage(data) {
+        switch (data.type) {
+            case 'sync-success':
+                notify('success', `Synchronisation réussie: ${data.url}`);
+                break;
+            
+            case 'CACHE_STATUS':
+                console.log('[PWA] Status cache:', data.data);
+                break;
+        }
+    }
+    
+    showUpdateNotification() {
+        if (confirm('Une nouvelle version de HackInterface est disponible. Mettre à jour?')) {
+            if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+                navigator.serviceWorker.controller.postMessage({
+                    type: 'SKIP_WAITING'
+                });
+                window.location.reload();
+            }
+        }
+    }
+    
+    async getCacheStatus() {
+        return new Promise((resolve) => {
+            if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+                const channel = new MessageChannel();
+                channel.port1.onmessage = (event) => {
+                    resolve(event.data);
+                };
+                navigator.serviceWorker.controller.postMessage(
+                    { type: 'GET_CACHE_STATUS' },
+                    [channel.port2]
+                );
+            } else {
+                resolve(null);
+            }
+        });
+    }
+    
+    async clearCache() {
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({
+                type: 'CLEAR_CACHE'
+            });
+            notify('info', 'Cache vidé');
+        }
+    }
+    
+    async cacheUrls(urls) {
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({
+                type: 'CACHE_URLS',
+                data: { urls }
+            });
+        }
+    }
+}
+
+// Initialiser le PWA Manager
+const pwaManager = new PWAManager();
+
+// Fonction utilitaire pour vérifier le mode hors-ligne
+function isOffline() {
+    return !navigator.onLine;
+}
+
+// Fonction pour mettre en cache les données importantes
+async function cacheImportantData() {
+    const urlsToCache = [
+        '/api/workflows',
+        '/api/templates/popular',
+        '/api/tools/status'
+    ];
+    
+    pwaManager.cacheUrls(urlsToCache);
+}
+
+// Appeler au chargement initial
+document.addEventListener('DOMContentLoaded', () => {
+    // Mettre en cache les données importantes après connexion
+    if (navigator.onLine) {
+        setTimeout(cacheImportantData, 5000);
     }
 });

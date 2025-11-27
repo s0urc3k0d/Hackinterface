@@ -1,9 +1,10 @@
 """
 Générateur de rapports
-Formats: JSON, OSCP-style, Client HTML
+Formats: JSON, HTML (OSCP/Client), Markdown, PDF
 """
 import os
 import json
+import subprocess
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from jinja2 import Template
@@ -11,7 +12,10 @@ from jinja2 import Template
 from core.config import settings
 
 class ReportGenerator:
-    """Génère des rapports de pentest"""
+    """Génère des rapports de pentest en plusieurs formats"""
+    
+    # Formats supportés
+    SUPPORTED_FORMATS = ["json", "oscp", "client", "markdown", "pdf"]
     
     def __init__(self):
         self.templates_dir = os.path.join(settings.BASE_DIR, "templates")
@@ -25,21 +29,64 @@ class ReportGenerator:
         results: Dict[str, Dict[str, Any]],
         include_screenshots: bool = True,
         title: str = None,
-        author: str = None
-    ) -> str:
+        author: str = None,
+        output_format: str = None
+    ) -> Dict[str, Any]:
         """
-        Génère un rapport selon le type demandé
+        Génère un rapport selon le type et format demandés
+        
+        Args:
+            report_type: Type de rapport (oscp, client)
+            targets: Liste des cibles
+            results: Résultats par cible
+            include_screenshots: Inclure les captures d'écran
+            title: Titre du rapport
+            author: Auteur du rapport
+            output_format: Format de sortie (html, markdown, pdf, json)
+        
+        Returns:
+            Dict avec filename et formats générés
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_format = output_format or "html"
+        generated_files = []
         
-        if report_type == "json":
-            return await self._generate_json(targets, results, timestamp)
-        elif report_type == "oscp":
-            return await self._generate_oscp(targets, results, timestamp, include_screenshots, title, author)
-        elif report_type == "client":
-            return await self._generate_client(targets, results, timestamp, include_screenshots, title, author)
-        else:
-            raise ValueError(f"Type de rapport inconnu: {report_type}")
+        if report_type == "json" or output_format == "json":
+            filename = await self._generate_json(targets, results, timestamp)
+            generated_files.append({"format": "json", "filename": filename})
+        
+        if report_type in ["oscp", "client"]:
+            # Générer HTML
+            if output_format in ["html", "all"]:
+                filename = await self._generate_html(
+                    report_type, targets, results, timestamp,
+                    include_screenshots, title, author
+                )
+                generated_files.append({"format": "html", "filename": filename})
+            
+            # Générer Markdown
+            if output_format in ["markdown", "md", "all"]:
+                filename = await self._generate_markdown(
+                    report_type, targets, results, timestamp,
+                    title, author
+                )
+                generated_files.append({"format": "markdown", "filename": filename})
+            
+            # Générer PDF
+            if output_format in ["pdf", "all"]:
+                html_file = await self._generate_html(
+                    report_type, targets, results, timestamp,
+                    include_screenshots, title, author
+                )
+                pdf_filename = await self._convert_html_to_pdf(html_file, timestamp)
+                if pdf_filename:
+                    generated_files.append({"format": "pdf", "filename": pdf_filename})
+        
+        return {
+            "status": "success",
+            "generated": generated_files,
+            "primary": generated_files[0]["filename"] if generated_files else None
+        }
     
     async def _generate_json(
         self,
@@ -54,13 +101,151 @@ class ReportGenerator:
         report_data = {
             "generated_at": datetime.now().isoformat(),
             "targets": targets,
-            "results": results
+            "results": results,
+            "vulnerabilities": self._extract_vulnerabilities(results),
+            "statistics": self._calculate_statistics(results)
         }
         
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(report_data, f, indent=2, ensure_ascii=False)
         
         return filename
+    
+    async def _generate_html(
+        self,
+        report_type: str,
+        targets: List[Dict[str, Any]],
+        results: Dict[str, Dict[str, Any]],
+        timestamp: str,
+        include_screenshots: bool,
+        title: str,
+        author: str
+    ) -> str:
+        """Génère un rapport HTML (OSCP ou Client)"""
+        if report_type == "oscp":
+            filename = f"oscp_report_{timestamp}.html"
+            html = self._render_oscp_template(
+                targets=targets,
+                results=results,
+                include_screenshots=include_screenshots,
+                title=title or "Penetration Test Report",
+                author=author or "Security Analyst",
+                date=datetime.now().strftime("%Y-%m-%d")
+            )
+        else:  # client
+            filename = f"client_report_{timestamp}.html"
+            html = self._render_client_template(
+                targets=targets,
+                results=results,
+                include_screenshots=include_screenshots,
+                title=title or "Security Assessment Report",
+                author=author or "Security Consultant",
+                date=datetime.now().strftime("%Y-%m-%d")
+            )
+        
+        filepath = os.path.join(settings.REPORTS_DIR, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        return filename
+    
+    async def _generate_markdown(
+        self,
+        report_type: str,
+        targets: List[Dict[str, Any]],
+        results: Dict[str, Dict[str, Any]],
+        timestamp: str,
+        title: str,
+        author: str
+    ) -> str:
+        """Génère un rapport Markdown"""
+        filename = f"report_{timestamp}.md"
+        filepath = os.path.join(settings.REPORTS_DIR, filename)
+        
+        vulnerabilities = self._extract_vulnerabilities(results)
+        ports_by_target = self._extract_open_ports(results)
+        vuln_stats = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for vuln in vulnerabilities:
+            sev = vuln["severity"].lower()
+            if sev in vuln_stats:
+                vuln_stats[sev] += 1
+        
+        md_content = self._render_markdown_template(
+            title=title or "Security Assessment Report",
+            author=author or "Security Analyst",
+            date=datetime.now().strftime("%Y-%m-%d"),
+            targets=targets,
+            results=results,
+            vulnerabilities=vulnerabilities,
+            ports_by_target=ports_by_target,
+            vuln_stats=vuln_stats
+        )
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(md_content)
+        
+        return filename
+    
+    async def _convert_html_to_pdf(self, html_filename: str, timestamp: str) -> Optional[str]:
+        """Convertit un rapport HTML en PDF"""
+        html_path = os.path.join(settings.REPORTS_DIR, html_filename)
+        pdf_filename = html_filename.replace('.html', '.pdf')
+        pdf_path = os.path.join(settings.REPORTS_DIR, pdf_filename)
+        
+        # Essayer avec wkhtmltopdf
+        try:
+            result = subprocess.run(
+                ['wkhtmltopdf', '--quiet', '--page-size', 'A4', 
+                 '--margin-top', '10mm', '--margin-bottom', '10mm',
+                 '--margin-left', '10mm', '--margin-right', '10mm',
+                 html_path, pdf_path],
+                capture_output=True,
+                timeout=120
+            )
+            if result.returncode == 0 and os.path.exists(pdf_path):
+                return pdf_filename
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        
+        # Essayer avec weasyprint (Python)
+        try:
+            from weasyprint import HTML
+            HTML(html_path).write_pdf(pdf_path)
+            if os.path.exists(pdf_path):
+                return pdf_filename
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[Report] Erreur weasyprint: {e}")
+        
+        return None
+    
+    def _calculate_statistics(self, results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Calcule les statistiques des résultats"""
+        stats = {
+            "total_actions": 0,
+            "completed_actions": 0,
+            "failed_actions": 0,
+            "total_duration": 0,
+            "targets_scanned": len(results)
+        }
+        
+        for target_id, target_results in results.items():
+            for action, result in target_results.items():
+                if isinstance(result, dict):
+                    stats["total_actions"] += 1
+                    if result.get("status") == "completed":
+                        stats["completed_actions"] += 1
+                    else:
+                        stats["failed_actions"] += 1
+                    stats["total_duration"] += result.get("duration", 0)
+        
+        return stats
+    
+    def _render_markdown_template(self, **kwargs) -> str:
+        """Génère le contenu Markdown du rapport"""
+        template = Template(MARKDOWN_TEMPLATE)
+        return template.render(**kwargs)
     
     async def _generate_oscp(
         self,
@@ -71,9 +256,9 @@ class ReportGenerator:
         title: str,
         author: str
     ) -> str:
-        """Génère un rapport style OSCP"""
-        filename = f"oscp_report_{timestamp}.html"
-        filepath = os.path.join(settings.REPORTS_DIR, filename)
+        """Génère un rapport style OSCP (legacy)"""
+        return await self._generate_html("oscp", targets, results, timestamp, 
+                                         include_screenshots, title, author)
         
         html = self._render_oscp_template(
             targets=targets,
@@ -722,4 +907,157 @@ CLIENT_TEMPLATE = """
     </footer>
 </body>
 </html>
+"""
+
+
+# Template Markdown
+MARKDOWN_TEMPLATE = """# {{ title }}
+
+**Author:** {{ author }}  
+**Date:** {{ date }}  
+**Classification:** Confidential
+
+---
+
+## Table of Contents
+
+1. [Executive Summary](#executive-summary)
+2. [Scope and Targets](#scope-and-targets)
+3. [Findings Summary](#findings-summary)
+4. [Detailed Findings](#detailed-findings)
+5. [Recommendations](#recommendations)
+6. [Appendix](#appendix)
+
+---
+
+## Executive Summary
+
+This security assessment was conducted against **{{ targets|length }}** target(s). The assessment identified **{{ vulnerabilities|length }}** security findings.
+
+### Risk Overview
+
+| Severity | Count |
+|----------|-------|
+| 🔴 Critical | {{ vuln_stats.critical }} |
+| 🟠 High | {{ vuln_stats.high }} |
+| 🟡 Medium | {{ vuln_stats.medium }} |
+| 🔵 Low | {{ vuln_stats.low }} |
+| ⚪ Info | {{ vuln_stats.info }} |
+
+{% if vuln_stats.critical > 0 %}
+> ⚠️ **CRITICAL ISSUES DETECTED** - Immediate action required!
+{% endif %}
+
+---
+
+## Scope and Targets
+
+### Target Systems
+
+| ID | Type | Target | Description |
+|----|------|--------|-------------|
+{% for target in targets %}
+| {{ target.id }} | {{ target.type }} | `{{ target.value }}` | {{ target.description or 'N/A' }} |
+{% endfor %}
+
+### Discovered Services
+
+{% for target_id, ports in ports_by_target.items() %}
+#### Target {{ target_id }}
+
+{% if ports %}
+| Port | Protocol | Service | Version |
+|------|----------|---------|---------|
+{% for port in ports %}
+| {{ port.port }} | {{ port.protocol }} | {{ port.service }} | {{ port.version or 'Unknown' }} |
+{% endfor %}
+{% else %}
+No open ports discovered.
+{% endif %}
+
+{% endfor %}
+
+---
+
+## Findings Summary
+
+{% if vulnerabilities %}
+| Severity | Finding | Location |
+|----------|---------|----------|
+{% for vuln in vulnerabilities %}
+| {{ vuln.severity|upper }} | {{ vuln.name }} | {{ vuln.location }} |
+{% endfor %}
+{% else %}
+No significant vulnerabilities were identified during this assessment.
+{% endif %}
+
+---
+
+## Detailed Findings
+
+{% for vuln in vulnerabilities %}
+### {{ loop.index }}. {{ vuln.name }}
+
+- **Severity:** {{ vuln.severity|upper }}
+- **Location:** `{{ vuln.location }}`
+- **Detection Method:** {{ vuln.source }}
+
+{% if vuln.description %}
+**Description:**
+{{ vuln.description }}
+{% endif %}
+
+{% if vuln.references %}
+**References:**
+{% for ref in vuln.references[:3] %}
+- {{ ref }}
+{% endfor %}
+{% endif %}
+
+**Recommendation:** Review and remediate this vulnerability according to vendor guidelines and security best practices.
+
+---
+
+{% endfor %}
+
+## Recommendations
+
+### Immediate Actions (Critical/High)
+{% if vuln_stats.critical > 0 or vuln_stats.high > 0 %}
+- [ ] Address all critical and high-severity vulnerabilities within 7 days
+- [ ] Implement emergency patches where available
+- [ ] Consider temporary mitigations (WAF rules, network segmentation)
+{% else %}
+- [x] No immediate critical actions required
+{% endif %}
+
+### Short-term Actions (Medium)
+- [ ] Remediate medium-severity findings within 30 days
+- [ ] Review and update security configurations
+- [ ] Implement security monitoring and alerting
+
+### Long-term Actions
+- [ ] Establish regular vulnerability scanning schedule
+- [ ] Implement security awareness training
+- [ ] Review and update security policies
+- [ ] Consider annual penetration testing
+
+---
+
+## Appendix
+
+### Tools Used
+- **Nmap** - Network scanning and service detection
+- **Nuclei** - Vulnerability scanning
+- **Gobuster/Feroxbuster** - Directory enumeration
+- **Nikto** - Web server scanning
+- **WhatWeb** - Technology fingerprinting
+
+### Assessment Timeline
+- **Date:** {{ date }}
+
+---
+
+*Generated by HackInterface*  
+*This document contains sensitive security information - handle accordingly.*
 """
