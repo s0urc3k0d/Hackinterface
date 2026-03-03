@@ -6,16 +6,21 @@ Point d'entrée principal de l'API FastAPI
 
 import os
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
+import contextvars
+import re
+import uuid
+from pathlib import Path
+from typing import Dict, Any
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, BackgroundTasks, Body, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 
 from core.config import settings
 from core.vpn import vpn_manager
-from core.executor import CommandExecutor
+from core.executor import CommandExecutor, escape_shell_arg, validate_target
 from core.websocket_manager import ConnectionManager
 from models.schemas import (
     TargetCreate, TargetResponse, ActionRequest, WorkflowRequest,
@@ -39,6 +44,76 @@ from modules.peas import PEASModule
 from workflows.engine import WorkflowEngine
 from reports.generator import ReportGenerator
 from core.database import db
+
+SESSION_KEY_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+_current_client_session_key: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_client_session_key",
+    default="default"
+)
+
+
+def _new_session_state() -> Dict[str, Any]:
+    """Crée un nouvel état de session isolé"""
+    return {
+        "id": None,
+        "targets": [],
+        "results": {},
+        "workflow_status": None
+    }
+
+
+def _resolve_session_key(
+    header_value: str | None = None,
+    query_value: str | None = None,
+    cookie_value: str | None = None
+) -> str:
+    """Détermine une clé de session valide"""
+    for candidate in (header_value, query_value, cookie_value):
+        if isinstance(candidate, str):
+            normalized = candidate.strip()
+            if SESSION_KEY_PATTERN.match(normalized):
+                return normalized
+    return "default"
+
+
+class SessionStateProxy:
+    """Proxy dictionnaire vers un store de session isolé par client"""
+
+    def __init__(self):
+        self._store: Dict[str, Dict[str, Any]] = {"default": _new_session_state()}
+
+    def _get_state(self) -> Dict[str, Any]:
+        key = _current_client_session_key.get()
+        if key not in self._store:
+            self._store[key] = _new_session_state()
+        return self._store[key]
+
+    def __getitem__(self, item):
+        return self._get_state()[item]
+
+    def __setitem__(self, key, value):
+        self._get_state()[key] = value
+
+    def __contains__(self, item):
+        return item in self._get_state()
+
+    def get(self, key, default=None):
+        return self._get_state().get(key, default)
+
+    def pop(self, key, default=None):
+        return self._get_state().pop(key, default)
+
+    def clear(self):
+        self._store[_current_client_session_key.get()] = _new_session_state()
+
+    def items(self):
+        return self._get_state().items()
+
+    def keys(self):
+        return self._get_state().keys()
+
+    def values(self):
+        return self._get_state().values()
 
 # Gestionnaire de connexions WebSocket
 ws_manager = ConnectionManager()
@@ -87,10 +162,59 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+def _extract_bearer_token(auth_header: str | None) -> str:
+    """Extrait le token Bearer depuis l'en-tête Authorization"""
+    if not auth_header:
+        return ""
+    if not auth_header.lower().startswith("bearer "):
+        return ""
+    return auth_header[7:].strip()
+
+
+def _is_valid_api_token(headers: Dict[str, str], query_token: str | None = None) -> bool:
+    """Vérifie la validité du token API"""
+    expected = settings.API_TOKEN
+    if not expected:
+        return True
+
+    bearer_token = _extract_bearer_token(headers.get("authorization"))
+    header_token = headers.get("x-api-key", "").strip()
+    query_value = (query_token or "").strip()
+
+    return expected in {bearer_token, header_token, query_value}
+
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    """Protège /api et attache un contexte de session mémoire isolé"""
+    session_key = _resolve_session_key(
+        header_value=request.headers.get("x-session-key"),
+        query_value=request.query_params.get("session_key"),
+        cookie_value=request.cookies.get("hackinterface_session")
+    )
+    context_token = _current_client_session_key.set(session_key)
+
+    try:
+        if settings.REQUIRE_API_AUTH and request.url.path.startswith("/api"):
+            if not _is_valid_api_token(dict(request.headers)):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "Authentification requise. Fournissez un token via Authorization: Bearer <token> ou X-API-Key."
+                    }
+                )
+
+        response = await call_next(request)
+        response.headers["X-Session-Key"] = session_key
+        return response
+    finally:
+        _current_client_session_key.reset(context_token)
+
 # CORS pour usage local
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -159,12 +283,17 @@ async def vpn_status():
 @app.post("/api/vpn/ping")
 async def ping_target(request: PingRequest):
     """Test de connectivité vers une IP"""
+    validation = validate_target(request.target)
+    if not validation.valid or validation.target_type not in {"ipv4", "ipv6", "fqdn", "domain"}:
+        raise HTTPException(status_code=400, detail="Cible invalide pour ping")
+
     executor = CommandExecutor()
-    result = await executor.run(f"ping -c 3 {request.target}")
+    target_safe = escape_shell_arg(validation.normalized)
+    result = await executor.run(f"ping -c 3 {target_safe}")
     success = result.return_code == 0
     return {
         "success": success,
-        "target": request.target,
+        "target": validation.normalized,
         "output": result.stdout if success else result.stderr
     }
 
@@ -221,13 +350,8 @@ async def validate_multiple_targets(request: dict):
 # ROUTES - Gestion des cibles
 # ============================================================================
 
-# Stockage en mémoire pour la session (pas de persistance multi-projets)
-current_session = {
-    "id": None,  # ID de session SQLite actuelle
-    "targets": [],
-    "results": {},
-    "workflow_status": None
-}
+# Stockage en mémoire isolé par client (clé session via header/query/cookie)
+current_session = SessionStateProxy()
 
 @app.post("/api/targets", response_model=TargetResponse)
 async def add_target(target: TargetCreate):
@@ -721,10 +845,37 @@ async def generate_report(request: dict):
 @app.get("/api/reports/download/{filename}")
 async def download_report(filename: str):
     """Télécharger un rapport généré"""
-    filepath = os.path.join(settings.REPORTS_DIR, filename)
-    if not os.path.exists(filepath):
+    reports_dir = Path(settings.REPORTS_DIR).resolve()
+    filepath = (reports_dir / filename).resolve()
+
+    if reports_dir not in filepath.parents and filepath != reports_dir:
+        raise HTTPException(status_code=400, detail="Nom de fichier invalide")
+
+    if not filepath.exists() or not filepath.is_file():
         raise HTTPException(status_code=404, detail="Rapport non trouvé")
-    return FileResponse(filepath, filename=filename)
+    return FileResponse(str(filepath), filename=filepath.name)
+
+
+async def replay_stored_command(command: str, task_id: str):
+    """Rejoue une commande historique en tâche de fond"""
+    executor = CommandExecutor()
+    await ws_manager.send_log("info", f"Replay {task_id} démarré")
+
+    try:
+        result = await executor.run(command)
+
+        if result.stdout:
+            await ws_manager.send_output(command, result.stdout, "stdout")
+        if result.stderr:
+            await ws_manager.send_output(command, result.stderr, "stderr")
+
+        level = "success" if result.return_code == 0 else "error"
+        await ws_manager.send_log(
+            level,
+            f"Replay {task_id} terminé (exit={result.return_code}, durée={result.duration:.2f}s)"
+        )
+    except Exception as e:
+        await ws_manager.send_log("error", f"Replay {task_id} échoué: {str(e)}")
 
 @app.get("/api/reports/list")
 async def list_reports():
@@ -797,11 +948,11 @@ async def get_command_history(
                 "id": e.id,
                 "action": e.action,
                 "target": e.target,
-                "options": e.options,
-                "timestamp": e.timestamp,
+                "status": e.status,
+                "timestamp": e.executed_at,
                 "duration": e.duration,
-                "success": e.success,
-                "exit_code": e.exit_code
+                "success": e.status == "success",
+                "exit_code": e.return_code
             } for e in entries
         ]
     }
@@ -826,13 +977,15 @@ async def get_history_entry(entry_id: int):
             "id": entry.id,
             "action": entry.action,
             "target": entry.target,
-            "options": entry.options,
+            "session_id": entry.session_id,
+            "status": entry.status,
             "command": entry.command,
-            "timestamp": entry.timestamp,
+            "timestamp": entry.executed_at,
             "duration": entry.duration,
-            "success": entry.success,
-            "exit_code": entry.exit_code,
-            "output_preview": entry.output_preview
+            "success": entry.status == "success",
+            "exit_code": entry.return_code,
+            "stdout_preview": entry.stdout_preview,
+            "stderr_preview": entry.stderr_preview
         }
     }
 
@@ -850,10 +1003,8 @@ async def replay_history_entry(entry_id: int, background_tasks: BackgroundTasks)
     
     # Lancer la commande en arrière-plan
     background_tasks.add_task(
-        execute_and_broadcast,
-        entry.action,
-        entry.target,
-        entry.options or {},
+        replay_stored_command,
+        entry.command,
         task_id
     )
     
@@ -875,8 +1026,6 @@ async def clear_history(before_date: str = None):
 async def export_history(format: str = "json"):
     """Exporte l'historique complet"""
     from core.history import command_history
-    from fastapi.responses import Response
-    
     if format == "json":
         data = command_history.export_history()
         return Response(
@@ -1160,6 +1309,13 @@ async def check_single_tool(tool_name: str):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket pour les mises à jour en temps réel"""
+    if settings.REQUIRE_API_AUTH:
+        headers = {k.lower(): v for k, v in websocket.headers.items()}
+        query_token = websocket.query_params.get("token")
+        if not _is_valid_api_token(headers, query_token):
+            await websocket.close(code=1008, reason="API token invalide")
+            return
+
     await ws_manager.connect(websocket)
     try:
         while True:
@@ -1171,6 +1327,76 @@ async def websocket_endpoint(websocket: WebSocket):
 # ============================================================================
 # ROUTES - Sessions persistantes (SQLite)
 # ============================================================================
+
+@app.get("/api/session/context")
+async def get_session_context():
+    """Retourne le contexte de session mémoire courant"""
+    session_key = _current_client_session_key.get()
+    targets = current_session.get("targets", []) or []
+    results = current_session.get("results", {}) or {}
+    action_count = sum(
+        len(target_results)
+        for target_results in results.values()
+        if isinstance(target_results, dict)
+    )
+
+    return {
+        "status": "ok",
+        "session_key": session_key,
+        "has_persistent_session": current_session.get("id") is not None,
+        "target_count": len(targets),
+        "result_target_count": len(results),
+        "result_action_count": action_count
+    }
+
+
+@app.post("/api/session/context")
+async def set_session_context(payload: Dict[str, Any] = Body(...)):
+    """Change/rotate la clé de session mémoire pour les prochains appels"""
+    previous_key = _current_client_session_key.get()
+
+    rotate = bool(payload.get("rotate", False))
+    requested_key = str(payload.get("session_key", "")).strip()
+    set_cookie = bool(payload.get("set_cookie", True))
+
+    if rotate or not requested_key:
+        new_key = f"s_{uuid.uuid4().hex[:16]}"
+    else:
+        new_key = requested_key
+
+    if not SESSION_KEY_PATTERN.match(new_key):
+        raise HTTPException(
+            status_code=400,
+            detail="session_key invalide (caractères autorisés: a-zA-Z0-9_- ; taille max 64)"
+        )
+
+    # Initialiser l'espace mémoire de la nouvelle clé si absent
+    token = _current_client_session_key.set(new_key)
+    try:
+        current_session.get("id")
+    finally:
+        _current_client_session_key.reset(token)
+
+    response = JSONResponse(
+        content={
+            "status": "ok",
+            "previous_session_key": previous_key,
+            "session_key": new_key,
+            "message": "Utilisez cette clé via X-Session-Key ou session_key query param"
+        }
+    )
+
+    if set_cookie:
+        response.set_cookie(
+            key="hackinterface_session",
+            value=new_key,
+            httponly=True,
+            samesite="lax",
+            secure=False,
+            path="/"
+        )
+
+    return response
 
 @app.get("/api/sessions")
 async def list_sessions():

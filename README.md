@@ -219,6 +219,16 @@ PORT = 8080
 # Timeouts
 COMMAND_TIMEOUT = 3600  # 1 heure pour les scans longs
 
+# Sécurité API (optionnel)
+API_TOKEN = ""  # ex: "change-moi"
+REQUIRE_API_AUTH = False  # True pour exiger le token sur /api et /ws
+
+# CORS (origines autorisées)
+ALLOWED_ORIGINS = [
+  "http://127.0.0.1:8080",
+  "http://localhost:8080"
+]
+
 # Wordlists par défaut
 DEFAULT_WORDLIST_DIR = "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
 
@@ -228,6 +238,34 @@ UPLOAD_DIR = "data/uploads"
 REPORTS_DIR = "data/reports"
 SCREENSHOTS_DIR = "data/screenshots"
 ```
+
+---
+
+### Variables d'environnement recommandées (Kali)
+
+```bash
+export API_TOKEN="change-moi-token-fort"
+export REQUIRE_API_AUTH=true
+export ALLOWED_ORIGINS="http://127.0.0.1:8080,http://localhost:8080"
+```
+
+- `Authorization: Bearer <token>` ou header `X-API-Key: <token>` pour l'API
+- WebSocket: `ws://127.0.0.1:8080/ws?token=<token>`
+- Isolation mémoire multi-client: header `X-Session-Key: <id>` (ou query `session_key=<id>`)
+
+#### Endpoints contexte session
+
+- `GET /api/session/context` : retourne la clé de session active + stats mémoire
+- `POST /api/session/context` : change/rotate la clé active
+  - body possible: `{ "session_key": "team-a", "rotate": false, "set_cookie": true }`
+  - body possible: `{ "rotate": true }` pour générer une nouvelle clé
+
+#### Intégration Frontend (déjà implémentée)
+
+- Le frontend envoie automatiquement `X-Session-Key` sur tous les appels `fetch`
+- Le frontend récupère/synchronise la clé via `GET /api/session/context` au démarrage
+- Le WebSocket inclut automatiquement `session_key` et `token` en query params
+- Le token API peut être passé via `?api_token=<token>` (persisté ensuite en localStorage)
 
 ---
 

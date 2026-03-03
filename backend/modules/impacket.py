@@ -9,6 +9,7 @@ from datetime import datetime
 from core.executor import CommandExecutor, escape_shell_arg
 import json
 import re
+import shlex
 
 
 class ImpacketModule:
@@ -24,6 +25,10 @@ class ImpacketModule:
     
     def __init__(self):
         self.executor = CommandExecutor()
+
+    async def _run_cmd(self, cmd: str, timeout: int):
+        """Exécute une commande via argv (sans shell)."""
+        return await self.executor.run_args(shlex.split(cmd), timeout=timeout)
     
     def _build_auth(self, options: Dict[str, Any]) -> str:
         """Construit la chaîne d'authentification Impacket format DOMAIN/user:password@target"""
@@ -66,7 +71,7 @@ class ImpacketModule:
         
         cmd = f"impacket-secretsdump {auth}@{target_safe} {extra}"
         
-        result = await self.executor.run(cmd, timeout=600)
+        result = await self._run_cmd(cmd, timeout=600)
         
         # Parser les hashes
         parsed = self._parse_secretsdump(result.stdout)
@@ -102,7 +107,7 @@ class ImpacketModule:
         
         cmd = f"impacket-GetUserSPNs {auth}@{target_safe} {extra}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         # Lire les hashes
         hashes = []
@@ -154,7 +159,7 @@ class ImpacketModule:
         if options.get("dc_ip"):
             cmd += f" -dc-ip {escape_shell_arg(options['dc_ip'])}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         # Lire les hashes AS-REP
         hashes = []
@@ -193,12 +198,12 @@ class ImpacketModule:
         command = options.get("command", "whoami")
         
         if command == "shell":
-            # Mode interactif - juste vérifier l'accès
-            cmd = f"echo 'exit' | impacket-psexec {auth}@{target_safe}"
+            # Mode interactif non-shell: test d'accès non interactif
+            cmd = f"impacket-psexec {auth}@{target_safe} 'whoami'"
         else:
             cmd = f"impacket-psexec {auth}@{target_safe} '{escape_shell_arg(command)}'"
-        
-        result = await self.executor.run(cmd, timeout=120)
+
+        result = await self._run_cmd(cmd, timeout=120)
         
         return {
             "action": "psexec",
@@ -228,7 +233,7 @@ class ImpacketModule:
         
         cmd = f"impacket-wmiexec {auth}@{target_safe} '{escape_shell_arg(command)}'"
         
-        result = await self.executor.run(cmd, timeout=120)
+        result = await self._run_cmd(cmd, timeout=120)
         
         return {
             "action": "wmiexec",
@@ -257,7 +262,7 @@ class ImpacketModule:
         
         cmd = f"impacket-smbexec {auth}@{target_safe} '{escape_shell_arg(command)}'"
         
-        result = await self.executor.run(cmd, timeout=120)
+        result = await self._run_cmd(cmd, timeout=120)
         
         return {
             "action": "smbexec",
@@ -287,7 +292,7 @@ class ImpacketModule:
         
         cmd = f"impacket-dcomexec -object {object_type} {auth}@{target_safe} '{escape_shell_arg(command)}'"
         
-        result = await self.executor.run(cmd, timeout=120)
+        result = await self._run_cmd(cmd, timeout=120)
         
         return {
             "action": "dcomexec",
@@ -316,7 +321,7 @@ class ImpacketModule:
         
         cmd = f"impacket-atexec {auth}@{target_safe} '{escape_shell_arg(command)}'"
         
-        result = await self.executor.run(cmd, timeout=120)
+        result = await self._run_cmd(cmd, timeout=120)
         
         return {
             "action": "atexec",
@@ -348,11 +353,7 @@ class ImpacketModule:
         else:
             cmd = f"impacket-smbclient {auth}@{target_safe}"
         
-        # Envoyer la commande
-        if command:
-            cmd = f"echo '{command}' | {cmd}"
-        
-        result = await self.executor.run(cmd, timeout=60)
+        result = await self._run_cmd(cmd, timeout=60)
         
         return {
             "action": "impacket_smbclient",
@@ -381,7 +382,7 @@ class ImpacketModule:
         
         cmd = f"impacket-lookupsid {auth}@{target_safe} {max_rid}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         # Parser les SIDs
         users, groups = self._parse_lookupsid(result.stdout)
@@ -417,7 +418,7 @@ class ImpacketModule:
         if options.get("dc_ip"):
             cmd += f" -dc-ip {escape_shell_arg(options['dc_ip'])}"
         
-        result = await self.executor.run(cmd, timeout=60)
+        result = await self._run_cmd(cmd, timeout=60)
         
         # Chercher le fichier .ccache généré
         ccache_file = None
@@ -463,7 +464,7 @@ class ImpacketModule:
         if options.get("dc_ip"):
             cmd += f" -dc-ip {escape_shell_arg(options['dc_ip'])}"
         
-        result = await self.executor.run(cmd, timeout=60)
+        result = await self._run_cmd(cmd, timeout=60)
         
         return {
             "action": "getST",

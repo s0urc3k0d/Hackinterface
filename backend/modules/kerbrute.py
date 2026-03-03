@@ -6,7 +6,7 @@ Kerbrute Module
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 import re
 
 
@@ -20,6 +20,18 @@ class KerbruteModule:
     
     def __init__(self):
         self.executor = CommandExecutor()
+
+    def _sanitize_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(parsed, maximum))
+
+    def _sanitize_path(self, value: Any, default: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            return default
+        return value.strip()
     
     async def userenum(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -27,17 +39,19 @@ class KerbruteModule:
         Ne génère pas de logs d'échec d'auth!
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         domain = options.get("domain", target)
         
-        userlist = options.get("userlist", "/usr/share/seclists/Usernames/xato-net-10-million-usernames.txt")
+        userlist = self._sanitize_path(options.get("userlist"), "/usr/share/seclists/Usernames/xato-net-10-million-usernames.txt")
         output_file = f"/tmp/kerbrute_users_{int(datetime.now().timestamp())}.txt"
         
-        threads = options.get("threads", 10)
-        
-        cmd = f"kerbrute userenum --dc {target_safe} -d {escape_shell_arg(domain)} {escape_shell_arg(userlist)} -t {threads} -o {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+        threads = self._sanitize_int(options.get("threads"), 10, 1, 128)
+
+        cmd_args = [
+            "kerbrute", "userenum", "--dc", target,
+            "-d", str(domain), userlist, "-t", str(threads), "-o", output_file
+        ]
+
+        result = await self.executor.run_args(cmd_args, timeout=1800)
         
         # Parser les utilisateurs valides
         valid_users = self._parse_valid_users(result.stdout)
@@ -53,7 +67,7 @@ class KerbruteModule:
             "action": "kerbrute_userenum",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -71,7 +85,6 @@ class KerbruteModule:
         Teste un mot de passe contre plusieurs utilisateurs
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         domain = options.get("domain", target)
         
         userlist = options.get("userlist", "")
@@ -87,11 +100,14 @@ class KerbruteModule:
             }
         
         output_file = f"/tmp/kerbrute_spray_{int(datetime.now().timestamp())}.txt"
-        threads = options.get("threads", 10)
-        
-        cmd = f"kerbrute passwordspray --dc {target_safe} -d {escape_shell_arg(domain)} {escape_shell_arg(userlist)} {escape_shell_arg(password)} -t {threads} -o {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+        threads = self._sanitize_int(options.get("threads"), 10, 1, 128)
+
+        cmd_args = [
+            "kerbrute", "passwordspray", "--dc", target,
+            "-d", str(domain), str(userlist), str(password), "-t", str(threads), "-o", output_file
+        ]
+
+        result = await self.executor.run_args(cmd_args, timeout=1800)
         
         # Parser les credentials valides
         valid_creds = self._parse_valid_creds(result.stdout)
@@ -100,7 +116,7 @@ class KerbruteModule:
             "action": "kerbrute_spray",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd.replace(password, "****"),
+            "command": result.command.replace(password, "****"),
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -117,11 +133,10 @@ class KerbruteModule:
         Brute-force de mot de passe pour un utilisateur spécifique
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         domain = options.get("domain", target)
         
         username = options.get("username", "")
-        passlist = options.get("passlist", "/usr/share/wordlists/rockyou.txt")
+        passlist = self._sanitize_path(options.get("passlist"), "/usr/share/wordlists/rockyou.txt")
         
         if not username:
             return {
@@ -133,11 +148,14 @@ class KerbruteModule:
             }
         
         output_file = f"/tmp/kerbrute_brute_{int(datetime.now().timestamp())}.txt"
-        threads = options.get("threads", 10)
-        
-        cmd = f"kerbrute bruteuser --dc {target_safe} -d {escape_shell_arg(domain)} {escape_shell_arg(passlist)} {escape_shell_arg(username)} -t {threads} -o {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        threads = self._sanitize_int(options.get("threads"), 10, 1, 128)
+
+        cmd_args = [
+            "kerbrute", "bruteuser", "--dc", target,
+            "-d", str(domain), passlist, str(username), "-t", str(threads), "-o", output_file
+        ]
+
+        result = await self.executor.run_args(cmd_args, timeout=3600)
         
         # Chercher le mot de passe trouvé
         found_password = self._parse_found_password(result.stdout, username)
@@ -146,7 +164,7 @@ class KerbruteModule:
             "action": "kerbrute_bruteforce",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -164,11 +182,10 @@ class KerbruteModule:
         Brute-force avec liste d'utilisateurs et liste de mots de passe
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         domain = options.get("domain", target)
         
         userlist = options.get("userlist", "")
-        passlist = options.get("passlist", "/usr/share/wordlists/rockyou.txt")
+        passlist = self._sanitize_path(options.get("passlist"), "/usr/share/wordlists/rockyou.txt")
         
         if not userlist:
             return {
@@ -180,11 +197,15 @@ class KerbruteModule:
             }
         
         output_file = f"/tmp/kerbrute_multi_{int(datetime.now().timestamp())}.txt"
-        threads = options.get("threads", 10)
-        
-        cmd = f"kerbrute bruteforce --dc {target_safe} -d {escape_shell_arg(domain)} -users {escape_shell_arg(userlist)} -passwords {escape_shell_arg(passlist)} -t {threads} -o {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=7200)
+        threads = self._sanitize_int(options.get("threads"), 10, 1, 128)
+
+        cmd_args = [
+            "kerbrute", "bruteforce", "--dc", target,
+            "-d", str(domain), "-users", str(userlist), "-passwords", passlist,
+            "-t", str(threads), "-o", output_file
+        ]
+
+        result = await self.executor.run_args(cmd_args, timeout=7200)
         
         # Parser tous les credentials trouvés
         valid_creds = self._parse_valid_creds(result.stdout)
@@ -193,7 +214,7 @@ class KerbruteModule:
             "action": "kerbrute_bruteforce_multi",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,

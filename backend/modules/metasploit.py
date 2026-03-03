@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import socket
 import time
+import shlex
 
 from core.executor import CommandExecutor, escape_shell_arg
 from core.config import settings
@@ -30,6 +31,10 @@ class MetasploitModule:
         self.msf_user = "msf"
         self.msf_pass = "hackinterface"
         self.rpc_client = None
+
+    async def _run_cmd(self, cmd: str, timeout: int):
+        """Exécute une commande via argv (sans shell)"""
+        return await self.executor.run_args(shlex.split(cmd), timeout=timeout)
     
     # =========================================================================
     # MSFVENOM - Génération de Payloads
@@ -70,7 +75,7 @@ class MetasploitModule:
         cmd_parts.append(f"-o {output_file}")
         cmd = " ".join(cmd_parts)
         
-        result = await self.executor.run(cmd, timeout=120)
+        result = await self._run_cmd(cmd, timeout=120)
         
         return {
             "action": "msfvenom",
@@ -93,20 +98,22 @@ class MetasploitModule:
         """
         Lister les payloads disponibles
         """
-        cmd = f"msfvenom -l payloads"
-        if filter_str:
-            cmd += f" | grep -i '{filter_str}'"
-        
-        result = await self.executor.run(cmd, timeout=60)
+        cmd = "msfvenom -l payloads"
+        result = await self._run_cmd(cmd, timeout=60)
         
         payloads = []
+        filter_lower = (filter_str or "").lower()
         for line in result.stdout.split('\n'):
             if '/' in line and not line.startswith('=') and not line.startswith('Name'):
                 parts = line.strip().split()
                 if parts:
+                    payload_name = parts[0]
+                    payload_desc = ' '.join(parts[1:]) if len(parts) > 1 else ""
+                    if filter_lower and filter_lower not in payload_name.lower() and filter_lower not in payload_desc.lower():
+                        continue
                     payloads.append({
-                        "name": parts[0],
-                        "description": ' '.join(parts[1:]) if len(parts) > 1 else ""
+                        "name": payload_name,
+                        "description": payload_desc
                     })
         
         return {
@@ -171,7 +178,7 @@ exit
         
         cmd = f"msfconsole -q -r {rc_file}"
         
-        result = await self.executor.run(cmd, timeout=600)
+        result = await self._run_cmd(cmd, timeout=600)
         
         # Parser les résultats
         parsed = self._parse_msf_output(result.stdout)
@@ -213,7 +220,7 @@ exit
         
         cmd = f"msfconsole -q -r {rc_file}"
         
-        result = await self.executor.run(cmd, timeout=120)
+        result = await self._run_cmd(cmd, timeout=120)
         
         # Déterminer le résultat du check
         vulnerable = False
@@ -266,7 +273,7 @@ exit
         
         cmd = f"msfconsole -q -r {rc_file}"
         
-        result = await self.executor.run(cmd, timeout=60)
+        result = await self._run_cmd(cmd, timeout=60)
         
         # Parser les résultats de recherche
         exploits = self._parse_search_results(result.stdout)
@@ -310,7 +317,7 @@ exit
         
         cmd = f"msfconsole -q -r {rc_file}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         parsed = self._parse_msf_output(result.stdout)
         
@@ -430,7 +437,7 @@ exit
         
         cmd = f"msfconsole -q -r {rc_file}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         return {
             "action": "msf_post",
@@ -471,7 +478,7 @@ exploit -j -z
         # Démarrer en arrière-plan
         cmd = f"screen -dmS msf_handler msfconsole -q -r {rc_file}"
         
-        result = await self.executor.run(cmd, timeout=30)
+        result = await self._run_cmd(cmd, timeout=30)
         
         return {
             "action": "msf_handler",

@@ -53,11 +53,48 @@ for tool in "${TOOLS[@]}"; do
     fi
 done
 
+# Configuration sécurité API par défaut
+if [ -z "${ALLOWED_ORIGINS:-}" ]; then
+    export ALLOWED_ORIGINS="http://127.0.0.1:8080,http://localhost:8080"
+fi
+
+if [ -z "${REQUIRE_API_AUTH:-}" ]; then
+    export REQUIRE_API_AUTH="true"
+fi
+
+auth_enabled="false"
+case "${REQUIRE_API_AUTH,,}" in
+    1|true|yes|on) auth_enabled="true" ;;
+esac
+
+if [ "$auth_enabled" = "true" ]; then
+    if [ -z "${API_TOKEN:-}" ]; then
+        if command -v openssl &> /dev/null; then
+            export API_TOKEN="$(openssl rand -hex 32)"
+        else
+            export API_TOKEN="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)"
+        fi
+    fi
+fi
+
 echo ""
 echo -e "${GREEN}[+] Démarrage de HackInterface...${NC}"
-echo -e "${BLUE}[*] Interface disponible sur: http://127.0.0.1:8443${NC}"
+echo -e "${BLUE}[*] Interface disponible sur: http://127.0.0.1:8080${NC}"
+
+if [ "$auth_enabled" = "true" ]; then
+    echo -e "${GREEN}[*] Auth API activée${NC}"
+    echo -e "${YELLOW}[*] API_TOKEN: ${API_TOKEN}${NC}"
+    echo -e "${BLUE}[*] URL directe: http://127.0.0.1:8080/?api_token=${API_TOKEN}${NC}"
+else
+    echo -e "${YELLOW}[*] Auth API désactivée (REQUIRE_API_AUTH=${REQUIRE_API_AUTH})${NC}"
+fi
+
 echo -e "${YELLOW}[*] Appuyez sur Ctrl+C pour arrêter${NC}"
 echo ""
 
 # Lancer l'application
-python3 -m uvicorn main:app --host 0.0.0.0 --port 8443 --reload
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local data and generated artifacts
+backend/data/*.db
+backend/data/reports/
+backend/data/uploads/
+backend/data/screenshots/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

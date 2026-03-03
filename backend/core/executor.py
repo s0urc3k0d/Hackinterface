@@ -137,6 +137,11 @@ class CommandExecutor:
     def __init__(self, max_concurrent: int = 5, delay_between: float = 0.5):
         self.running_processes: Dict[str, subprocess.Popen] = {}
         self.rate_limiter = RateLimiter(max_concurrent, delay_between)
+
+    @staticmethod
+    def _format_command_args(command_args: List[str]) -> str:
+        """Formate une commande argv en chaîne lisible pour logs/rapports"""
+        return " ".join(shlex.quote(str(part)) for part in command_args)
     
     async def run(
         self,
@@ -208,6 +213,95 @@ class CommandExecutor:
             await self.rate_limiter.release(success=False)
             return CommandResult(
                 command=command,
+                stdout="",
+                stderr=str(e),
+                return_code=-1,
+                duration=duration,
+                timestamp=timestamp
+            )
+
+    async def run_args(
+        self,
+        command_args: List[str],
+        timeout: Optional[int] = None,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        stdin_data: Optional[str] = None
+    ) -> CommandResult:
+        """
+        Exécute une commande via argv (sans shell) pour réduire les risques d'injection.
+        """
+        if not command_args:
+            timestamp = datetime.now().isoformat()
+            return CommandResult(
+                command="",
+                stdout="",
+                stderr="Commande vide",
+                return_code=-1,
+                duration=0.0,
+                timestamp=timestamp
+            )
+
+        if timeout is None:
+            timeout = settings.COMMAND_TIMEOUT
+
+        start_time = datetime.now()
+        timestamp = start_time.isoformat()
+        command_str = self._format_command_args(command_args)
+
+        cmd_env = os.environ.copy()
+        if env:
+            cmd_env.update(env)
+
+        await self.rate_limiter.acquire()
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command_args,
+                stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+                env=cmd_env
+            )
+
+            try:
+                input_bytes = stdin_data.encode("utf-8") if stdin_data is not None else None
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input=input_bytes),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.communicate()
+                await self.rate_limiter.release(success=False)
+                return CommandResult(
+                    command=command_str,
+                    stdout="",
+                    stderr=f"Commande interrompue après {timeout} secondes",
+                    return_code=-1,
+                    duration=timeout,
+                    timestamp=timestamp
+                )
+
+            duration = (datetime.now() - start_time).total_seconds()
+            success = process.returncode == 0
+            await self.rate_limiter.release(success=success)
+
+            return CommandResult(
+                command=command_str,
+                stdout=stdout.decode('utf-8', errors='replace'),
+                stderr=stderr.decode('utf-8', errors='replace'),
+                return_code=process.returncode,
+                duration=duration,
+                timestamp=timestamp
+            )
+
+        except Exception as e:
+            duration = (datetime.now() - start_time).total_seconds()
+            await self.rate_limiter.release(success=False)
+            return CommandResult(
+                command=command_str,
                 stdout="",
                 stderr=str(e),
                 return_code=-1,

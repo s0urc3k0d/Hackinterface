@@ -6,7 +6,7 @@ Intégration de BloodHound et SharpHound pour la cartographie AD
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 import json
 import os
 import zipfile
@@ -31,7 +31,6 @@ class BloodHoundModule:
         Plus furtif, fonctionne depuis Linux
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
@@ -42,21 +41,20 @@ class BloodHoundModule:
         
         # Méthodes de collecte
         collect_methods = options.get("collect", "Default")  # All, Default, DCOnly, Group, LocalAdmin, Session, Trusts, etc.
-        
-        cmd = f"bloodhound-python -u {escape_shell_arg(username)} -p {escape_shell_arg(password)} -d {escape_shell_arg(domain)}"
-        
+
+        cmd_args = ["bloodhound-python", "-u", str(username), "-p", str(password), "-d", str(domain)]
+
         if options.get("dc_ip"):
-            cmd += f" -dc {escape_shell_arg(options['dc_ip'])}"
+            cmd_args.extend(["-dc", str(options["dc_ip"])])
         else:
-            cmd += f" -dc {target_safe}"
+            cmd_args.extend(["-dc", target])
         
         if options.get("nameserver"):
-            cmd += f" -ns {escape_shell_arg(options['nameserver'])}"
-        
-        cmd += f" -c {collect_methods}"
-        cmd += f" --zip -o {output_dir}"
-        
-        result = await self.executor.run(cmd, timeout=900)
+            cmd_args.extend(["-ns", str(options["nameserver"])])
+
+        cmd_args.extend(["-c", str(collect_methods), "--zip", "-o", output_dir])
+
+        result = await self.executor.run_args(cmd_args, timeout=900)
         
         # Trouver le fichier ZIP généré
         zip_files = [f for f in os.listdir(output_dir) if f.endswith('.zip')]
@@ -70,7 +68,7 @@ class BloodHoundModule:
             "action": "bloodhound_collect",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd.replace(password, "****") if password else cmd,
+            "command": result.command.replace(password, "****") if password else result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -95,18 +93,18 @@ class BloodHoundModule:
         os.makedirs(output_dir, exist_ok=True)
         
         # Collecte DNS only
-        cmd = f"bloodhound-python -d {escape_shell_arg(domain)} -c DCOnly --dns-tcp -o {output_dir}"
-        
+        cmd_args = ["bloodhound-python", "-d", str(domain), "-c", "DCOnly", "--dns-tcp", "-o", output_dir]
+
         if options.get("nameserver"):
-            cmd += f" -ns {escape_shell_arg(options['nameserver'])}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+            cmd_args.extend(["-ns", str(options["nameserver"])])
+
+        result = await self.executor.run_args(cmd_args, timeout=300)
         
         return {
             "action": "bloodhound_dns",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -171,15 +169,15 @@ class BloodHoundModule:
         neo4j_pass = options.get("neo4j_pass", "neo4j")
         
         # Utiliser bloodhound-import si disponible
-        cmd = f"bloodhound-import -du {neo4j_user} -dp {neo4j_pass} {escape_shell_arg(zip_path)}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+        command_args = ["bloodhound-import", "-du", str(neo4j_user), "-dp", str(neo4j_pass), zip_path]
+
+        result = await self.executor.run_args(command_args, timeout=300)
         
         return {
             "action": "bloodhound_import",
             "target": zip_path,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd.replace(neo4j_pass, "****"),
+            "command": result.command.replace(neo4j_pass, "****"),
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,

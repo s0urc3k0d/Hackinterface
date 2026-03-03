@@ -4,10 +4,12 @@ Nuclei, SearchSploit, etc.
 """
 import re
 import json
+import os
+import tempfile
 from typing import Dict, Any, List
 from datetime import datetime
 
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 from core.config import settings
 
 class VulnScanModule:
@@ -15,6 +17,16 @@ class VulnScanModule:
     
     def __init__(self):
         self.executor = CommandExecutor()
+
+    def _sanitize_csv(self, value: Any, default: str, pattern: str) -> str:
+        if not isinstance(value, str):
+            return default
+        cleaned = value.strip().replace(" ", "")
+        if not cleaned:
+            return default
+        if not re.match(pattern, cleaned):
+            return default
+        return cleaned
     
     async def nuclei_scan(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -24,22 +36,24 @@ class VulnScanModule:
         
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
-        
-        target_safe = escape_shell_arg(target)
-        
+
         # Options Nuclei
-        severity = options.get("severity", "low,medium,high,critical")
-        tags = options.get("tags", "")
+        severity = self._sanitize_csv(
+            options.get("severity"),
+            "low,medium,high,critical",
+            r'^[a-z,]+$'
+        )
+        tags = self._sanitize_csv(options.get("tags"), "", r'^[a-zA-Z0-9,_-]+$')
         templates = options.get("templates", "")
-        
-        cmd = f"nuclei -u {target_safe} -severity {severity} -silent -json"
-        
+
+        command_args = ["nuclei", "-u", target, "-severity", severity, "-silent", "-json"]
+
         if tags:
-            cmd += f" -tags {tags}"
+            command_args.extend(["-tags", tags])
         if templates:
-            cmd += f" -t {templates}"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+            command_args.extend(["-t", str(templates)])
+
+        result = await self.executor.run_args(command_args, timeout=1800)
         
         parsed = self._parse_nuclei(result.stdout) if result.return_code == 0 else None
         
@@ -47,7 +61,7 @@ class VulnScanModule:
             "action": "nuclei",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -60,11 +74,13 @@ class VulnScanModule:
         Scan Nuclei pour les vulnérabilités réseau
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"nuclei -u {target_safe} -t network/ -severity low,medium,high,critical -silent -json"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+
+        command_args = [
+            "nuclei", "-u", target, "-t", "network/",
+            "-severity", "low,medium,high,critical", "-silent", "-json"
+        ]
+
+        result = await self.executor.run_args(command_args, timeout=1800)
         
         parsed = self._parse_nuclei(result.stdout) if result.return_code == 0 else None
         
@@ -72,7 +88,7 @@ class VulnScanModule:
             "action": "nuclei_network",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -85,12 +101,11 @@ class VulnScanModule:
         Recherche d'exploits avec SearchSploit
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
+
         # Recherche basique
-        cmd = f"searchsploit {target_safe} --json"
-        
-        result = await self.executor.run(cmd, timeout=60)
+        command_args = ["searchsploit", target, "--json"]
+
+        result = await self.executor.run_args(command_args, timeout=60)
         
         parsed = self._parse_searchsploit(result.stdout) if result.return_code == 0 else None
         
@@ -98,7 +113,7 @@ class VulnScanModule:
             "action": "searchsploit",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -110,17 +125,14 @@ class VulnScanModule:
         """
         Recherche d'exploits basée sur un scan Nmap
         """
-        import tempfile
-        import os
-        
         # Écrire le XML dans un fichier temporaire
         with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
             f.write(nmap_xml)
             xml_path = f.name
         
         try:
-            cmd = f"searchsploit --nmap {xml_path} --json"
-            result = await self.executor.run(cmd, timeout=60)
+            command_args = ["searchsploit", "--nmap", xml_path, "--json"]
+            result = await self.executor.run_args(command_args, timeout=60)
             
             parsed = self._parse_searchsploit(result.stdout) if result.return_code == 0 else None
             
@@ -128,7 +140,7 @@ class VulnScanModule:
                 "action": "searchsploit_nmap",
                 "target": "nmap_results",
                 "status": "completed" if result.return_code == 0 else "error",
-                "command": cmd,
+                "command": result.command,
                 "output": result.stdout,
                 "error": result.stderr if result.return_code != 0 else None,
                 "duration": result.duration,
@@ -143,15 +155,14 @@ class VulnScanModule:
         Scan Nmap avec scripts vulners
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         ports = options.get("ports", "")
-        
+
+        command_args = ["nmap", "-sV", "--script=vulners"]
         if ports:
-            cmd = f"nmap -sV --script=vulners -p {ports} {target_safe}"
-        else:
-            cmd = f"nmap -sV --script=vulners {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=1200)
+            command_args.extend(["-p", str(ports)])
+        command_args.append(target)
+
+        result = await self.executor.run_args(command_args, timeout=1200)
         
         parsed = self._parse_vulners(result.stdout) if result.return_code == 0 else None
         
@@ -159,7 +170,7 @@ class VulnScanModule:
             "action": "nmap_vulners",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -175,12 +186,10 @@ class VulnScanModule:
         
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
-        
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"nuclei -u {target_safe} -tags default-login -silent -json"
-        
-        result = await self.executor.run(cmd, timeout=600)
+
+        command_args = ["nuclei", "-u", target, "-tags", "default-login", "-silent", "-json"]
+
+        result = await self.executor.run_args(command_args, timeout=600)
         
         parsed = self._parse_nuclei(result.stdout) if result.return_code == 0 else None
         
@@ -188,7 +197,7 @@ class VulnScanModule:
             "action": "check_default_creds",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -206,27 +215,51 @@ class VulnScanModule:
         host = target.replace('https://', '').replace('http://', '').split('/')[0]
         if ':' not in host:
             host += ':443'
-        
-        host_safe = escape_shell_arg(host)
-        
+
+        command_args = None
+        openssl_cert_path = None
+
         # Utiliser sslscan ou testssl.sh
         if self.executor.check_tool_available("sslscan"):
-            cmd = f"sslscan --no-colour {host_safe}"
+            command_args = ["sslscan", "--no-colour", host]
         elif self.executor.check_tool_available("testssl.sh"):
-            cmd = f"testssl.sh --quiet {host_safe}"
+            command_args = ["testssl.sh", "--quiet", host]
         else:
-            # Fallback avec openssl
-            cmd = f"echo | openssl s_client -connect {host_safe} 2>/dev/null | openssl x509 -noout -text"
-        
-        result = await self.executor.run(cmd, timeout=300)
-        
-        parsed = self._parse_ssl(result.stdout) if result.return_code == 0 else None
+            # Fallback sans pipeline shell: récupérer le certificat puis le parser
+            sclient_result = await self.executor.run_args(["openssl", "s_client", "-connect", host, "-showcerts"], timeout=300)
+            pem_matches = re.findall(
+                r'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
+                sclient_result.stdout,
+                flags=re.S
+            )
+
+            if pem_matches:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as cert_file:
+                    cert_file.write(pem_matches[0])
+                    openssl_cert_path = cert_file.name
+                result = await self.executor.run_args(
+                    ["openssl", "x509", "-in", openssl_cert_path, "-noout", "-text"],
+                    timeout=120
+                )
+            else:
+                result = sclient_result
+
+        if command_args is not None:
+            result = await self.executor.run_args(command_args, timeout=300)
+
+        try:
+            parsed = self._parse_ssl(result.stdout) if result.return_code == 0 else None
+        finally:
+            if openssl_cert_path and os.path.exists(openssl_cert_path):
+                os.unlink(openssl_cert_path)
+
+        command_display = result.command
         
         return {
             "action": "ssl_scan",
             "target": host,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": command_display,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
