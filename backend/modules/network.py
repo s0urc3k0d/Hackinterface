@@ -4,10 +4,11 @@ Capture réseau, MITM et analyse
 """
 import os
 import re
+import shlex
 from typing import Dict, Any, List
 from datetime import datetime
 
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 from core.config import settings
 
 
@@ -16,6 +17,9 @@ class NetworkModule:
     
     def __init__(self):
         self.executor = CommandExecutor()
+
+    def _cmd_display(self, args: List[str]) -> str:
+        return " ".join(shlex.quote(str(arg)) for arg in args)
     
     async def tcpdump_capture(self, interface: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -26,11 +30,13 @@ class NetworkModule:
         count = options.get("count", 100)
         filter_expr = options.get("filter", "")
         output_file = options.get("output", f"/tmp/capture_{int(datetime.now().timestamp())}.pcap")
-        
-        filter_arg = f"'{filter_expr}'" if filter_expr else ""
-        cmd = f"tcpdump -i {interface} -c {count} -w {output_file} {filter_arg}"
-        
-        result = await self.executor.run(cmd, timeout=120)
+
+        cmd_args = ["tcpdump", "-i", interface, "-c", str(count), "-w", output_file]
+        if filter_expr:
+            cmd_args.append(filter_expr)
+
+        result = await self.executor.run_args(cmd_args, timeout=120)
+        cmd = self._cmd_display(cmd_args)
         
         return {
             "action": "tcpdump",
@@ -51,13 +57,19 @@ class NetworkModule:
         
         display_filter = options.get("filter", "")
         fields = options.get("fields", "")
-        
-        filter_arg = f"-Y '{display_filter}'" if display_filter else ""
-        fields_arg = f"-T fields {' '.join([f'-e {f}' for f in fields.split(',')])}" if fields else ""
-        
-        cmd = f"tshark -r {pcap_file} {filter_arg} {fields_arg}"
-        
-        result = await self.executor.run(cmd, timeout=120)
+
+        cmd_args = ["tshark", "-r", pcap_file]
+        if display_filter:
+            cmd_args.extend(["-Y", display_filter])
+        if fields:
+            cmd_args.extend(["-T", "fields"])
+            for field_name in fields.split(','):
+                field_name = field_name.strip()
+                if field_name:
+                    cmd_args.extend(["-e", field_name])
+
+        result = await self.executor.run_args(cmd_args, timeout=120)
+        cmd = self._cmd_display(cmd_args)
         
         return {
             "action": "tshark",
@@ -77,18 +89,18 @@ class NetworkModule:
         stats = {}
         
         # Conversations
-        cmd = f"tshark -r {pcap_file} -q -z conv,ip"
-        result = await self.executor.run(cmd, timeout=60)
+        cmd_args = ["tshark", "-r", pcap_file, "-q", "-z", "conv,ip"]
+        result = await self.executor.run_args(cmd_args, timeout=60)
         stats["conversations"] = result.stdout
         
         # Protocoles
-        cmd = f"tshark -r {pcap_file} -q -z io,phs"
-        result = await self.executor.run(cmd, timeout=60)
+        cmd_args = ["tshark", "-r", pcap_file, "-q", "-z", "io,phs"]
+        result = await self.executor.run_args(cmd_args, timeout=60)
         stats["protocols"] = result.stdout
         
         # Endpoints
-        cmd = f"tshark -r {pcap_file} -q -z endpoints,ip"
-        result = await self.executor.run(cmd, timeout=60)
+        cmd_args = ["tshark", "-r", pcap_file, "-q", "-z", "endpoints,ip"]
+        result = await self.executor.run_args(cmd_args, timeout=60)
         stats["endpoints"] = result.stdout
         
         return {
@@ -107,13 +119,14 @@ class NetworkModule:
         options = options or {}
         
         analyze_only = options.get("analyze", False)
-        
-        cmd = f"responder -I {interface}"
+
+        cmd_args = ["responder", "-I", interface]
         if analyze_only:
-            cmd += " -A"  # Mode analyse seulement
+            cmd_args.append("-A")  # Mode analyse seulement
         
-        # Responder tourne en continu, on le lance en background
-        result = await self.executor.run(f"timeout 60 {cmd}", timeout=70)
+        # Responder tourne en continu, on impose un timeout côté exécuteur
+        result = await self.executor.run_args(cmd_args, timeout=60)
+        cmd = self._cmd_display(cmd_args)
         
         # Lire les logs
         log_file = "/usr/share/responder/logs/Responder-Session.log"
@@ -140,11 +153,9 @@ class NetworkModule:
         """
         Scan ARP du réseau local
         """
-        network_safe = escape_shell_arg(network)
-        
-        cmd = f"arp-scan {network_safe}"
-        
-        result = await self.executor.run(cmd, timeout=120)
+        cmd_args = ["arp-scan", network]
+        result = await self.executor.run_args(cmd_args, timeout=120)
+        cmd = self._cmd_display(cmd_args)
         
         parsed = self._parse_arp_scan(result.stdout)
         
@@ -164,10 +175,13 @@ class NetworkModule:
         """
         Découverte réseau passive/active avec netdiscover
         """
-        range_arg = f"-r {network}" if network else ""
-        cmd = f"netdiscover -i {interface} {range_arg} -P -N"  # -P = passive, -N = no header
-        
-        result = await self.executor.run(f"timeout 30 {cmd}", timeout=40)
+        cmd_args = ["netdiscover", "-i", interface]
+        if network:
+            cmd_args.extend(["-r", network])
+        cmd_args.extend(["-P", "-N"])  # -P = passive, -N = no header
+
+        result = await self.executor.run_args(cmd_args, timeout=30)
+        cmd = self._cmd_display(cmd_args)
         
         parsed = self._parse_netdiscover(result.stdout)
         
@@ -187,15 +201,15 @@ class NetworkModule:
         Scan de ports ultra-rapide avec masscan
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         ports = options.get("ports", "1-65535")
         rate = options.get("rate", 1000)
         
         output_file = f"/tmp/masscan_{int(datetime.now().timestamp())}.json"
-        cmd = f"masscan {target_safe} -p{ports} --rate={rate} -oJ {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+        cmd_args = ["masscan", target, f"-p{ports}", f"--rate={rate}", "-oJ", output_file]
+
+        result = await self.executor.run_args(cmd_args, timeout=600)
+        cmd = self._cmd_display(cmd_args)
         
         # Lire le fichier JSON
         parsed = {"hosts": []}
@@ -224,11 +238,10 @@ class NetworkModule:
         """
         Analyse SSL/TLS avec sslscan
         """
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"sslscan --no-colour {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=60)
+        cmd_args = ["sslscan", "--no-colour", target]
+
+        result = await self.executor.run_args(cmd_args, timeout=60)
+        cmd = self._cmd_display(cmd_args)
         
         parsed = self._parse_sslscan(result.stdout)
         
@@ -248,11 +261,10 @@ class NetworkModule:
         """
         Analyse SSL/TLS approfondie avec testssl.sh
         """
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"testssl --quiet --color 0 {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+        cmd_args = ["testssl", "--quiet", "--color", "0", target]
+
+        result = await self.executor.run_args(cmd_args, timeout=300)
+        cmd = self._cmd_display(cmd_args)
         
         return {
             "action": "testssl",

@@ -240,6 +240,10 @@ class CommandHistory:
                 executed_at=row['executed_at']
             )
         return None
+
+    def get_entry(self, entry_id: int) -> Optional[CommandHistoryEntry]:
+        """Alias de compatibilité pour récupérer une entrée par ID"""
+        return self.get_by_id(entry_id)
     
     def get_recent(self, limit: int = 20) -> List[CommandHistoryEntry]:
         """Récupère les commandes les plus récentes"""
@@ -359,6 +363,52 @@ class CommandHistory:
         conn.close()
         
         return deleted
+
+    def clear(self, before_date: str = None) -> int:
+        """
+        Supprime l'historique.
+        - Si before_date est fourni (ISO date/datetime), supprime avant cette date.
+        - Sinon supprime tout.
+        """
+        if not before_date:
+            return self.clear_all()
+
+        try:
+            cutoff = datetime.fromisoformat(before_date).isoformat()
+        except ValueError:
+            raise ValueError("before_date doit être au format ISO (YYYY-MM-DD ou YYYY-MM-DDTHH:MM:SS)")
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            DELETE FROM command_history_fts
+            WHERE rowid IN (SELECT id FROM command_history WHERE executed_at < ?)
+        ''', (cutoff,))
+
+        cursor.execute('DELETE FROM command_history WHERE executed_at < ?', (cutoff,))
+        deleted = cursor.rowcount
+
+        conn.commit()
+        conn.close()
+
+        return deleted
+
+    def export_history(self) -> str:
+        """Exporte tout l'historique en JSON"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT * FROM command_history
+            ORDER BY executed_at DESC
+        ''')
+
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        return json.dumps(rows, ensure_ascii=False, indent=2)
 
 
 # Instance globale

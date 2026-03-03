@@ -6,7 +6,7 @@ import re
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 from core.config import settings
 
 class WebEnumModule:
@@ -14,6 +14,42 @@ class WebEnumModule:
     
     def __init__(self):
         self.executor = CommandExecutor()
+
+    def _sanitize_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        """Valide un entier dans un intervalle borné"""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(parsed, maximum))
+
+    def _sanitize_wordlist(self, value: Any, default: str) -> str:
+        """Valide un chemin de wordlist"""
+        if not isinstance(value, str) or not value.strip():
+            value = default
+        return value.strip()
+
+    def _sanitize_enum(self, value: Any, default: str = "vp,vt,u") -> str:
+        """Valide les options d'énumération WPScan"""
+        if not isinstance(value, str):
+            return default
+        cleaned = value.strip().replace(" ", "")
+        if not cleaned:
+            return default
+        if not re.match(r'^[a-zA-Z,]+$', cleaned):
+            return default
+        return cleaned
+
+    def _sanitize_extensions(self, value: Any, default: str = "") -> str:
+        """Valide la liste d'extensions (format csv alphanumérique)"""
+        if not isinstance(value, str):
+            return default
+        cleaned = value.strip().replace(" ", "")
+        if not cleaned:
+            return default
+        if not re.match(r'^[a-zA-Z0-9,]+$', cleaned):
+            return default
+        return cleaned[:120]
     
     async def gobuster(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -25,14 +61,17 @@ class WebEnumModule:
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
         
-        target_safe = escape_shell_arg(target)
-        wordlist = options.get("wordlist", settings.DEFAULT_WORDLIST_DIR)
-        extensions = options.get("extensions", "php,html,txt,js,asp,aspx")
-        threads = options.get("threads", 50)
-        
-        cmd = f"gobuster dir -u {target_safe} -w {wordlist} -x {extensions} -t {threads} -q --no-progress"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+        target_safe = target
+        wordlist = self._sanitize_wordlist(options.get("wordlist"), settings.DEFAULT_WORDLIST_DIR)
+        extensions = self._sanitize_extensions(options.get("extensions"), "php,html,txt,js,asp,aspx")
+        threads = self._sanitize_int(options.get("threads"), 50, 1, 200)
+
+        command_args = [
+            "gobuster", "dir", "-u", target_safe, "-w", wordlist,
+            "-x", extensions, "-t", str(threads), "-q", "--no-progress"
+        ]
+
+        result = await self.executor.run_args(command_args, timeout=1800)
         
         parsed = self._parse_gobuster(result.stdout) if result.return_code == 0 else None
         
@@ -40,7 +79,7 @@ class WebEnumModule:
             "action": "gobuster",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -57,15 +96,19 @@ class WebEnumModule:
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
         
-        target_safe = escape_shell_arg(target)
-        wordlist = options.get("wordlist", settings.DEFAULT_WORDLIST_DIR)
-        extensions = options.get("extensions", "php,html,txt,js")
-        threads = options.get("threads", 50)
-        depth = options.get("depth", 2)
-        
-        cmd = f"feroxbuster -u {target_safe} -w {wordlist} -x {extensions} -t {threads} -d {depth} --quiet --no-state"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+        target_safe = target
+        wordlist = self._sanitize_wordlist(options.get("wordlist"), settings.DEFAULT_WORDLIST_DIR)
+        extensions = self._sanitize_extensions(options.get("extensions"), "php,html,txt,js")
+        threads = self._sanitize_int(options.get("threads"), 50, 1, 200)
+        depth = self._sanitize_int(options.get("depth"), 2, 1, 10)
+
+        command_args = [
+            "feroxbuster", "-u", target_safe, "-w", wordlist,
+            "-x", extensions, "-t", str(threads), "-d", str(depth),
+            "--quiet", "--no-state"
+        ]
+
+        result = await self.executor.run_args(command_args, timeout=1800)
         
         parsed = self._parse_feroxbuster(result.stdout) if result.return_code == 0 else None
         
@@ -73,7 +116,7 @@ class WebEnumModule:
             "action": "feroxbuster",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -94,17 +137,19 @@ class WebEnumModule:
         if "FUZZ" not in target:
             target = f"{target}/FUZZ"
         
-        target_safe = escape_shell_arg(target)
-        wordlist = options.get("wordlist", settings.DEFAULT_WORDLIST_DIR)
-        extensions = options.get("extensions", "")
-        threads = options.get("threads", 50)
-        
-        # Utiliser -o pour la sortie JSON
-        cmd = f"ffuf -u {target_safe} -w {wordlist} -t {threads} -mc all -fc 404 -of json -o /tmp/ffuf_output.json"
+        target_safe = target
+        wordlist = self._sanitize_wordlist(options.get("wordlist"), settings.DEFAULT_WORDLIST_DIR)
+        extensions = self._sanitize_extensions(options.get("extensions"), "")
+        threads = self._sanitize_int(options.get("threads"), 50, 1, 200)
+
+        command_args = [
+            "ffuf", "-u", target_safe, "-w", wordlist, "-t", str(threads),
+            "-mc", "all", "-fc", "404", "-of", "json", "-o", "/tmp/ffuf_output.json"
+        ]
         if extensions:
-            cmd += f" -e {extensions}"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+            command_args.extend(["-e", extensions])
+
+        result = await self.executor.run_args(command_args, timeout=1800)
         
         # Parser le JSON de sortie
         parsed = self._parse_ffuf(result.return_code)
@@ -113,7 +158,7 @@ class WebEnumModule:
             "action": "ffuf",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -178,11 +223,7 @@ class WebEnumModule:
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
         
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"nikto -h {target_safe} -Format txt -nointeractive"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+        result = await self.executor.run_args(["nikto", "-h", target, "-Format", "txt", "-nointeractive"], timeout=1800)
         
         parsed = self._parse_nikto(result.stdout) if result.return_code == 0 else None
         
@@ -190,7 +231,7 @@ class WebEnumModule:
             "action": "nikto",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -207,12 +248,9 @@ class WebEnumModule:
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
         
-        target_safe = escape_shell_arg(target)
-        aggression = options.get("aggression", 3)
-        
-        cmd = f"whatweb -a {aggression} --color=never {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=120)
+        aggression = self._sanitize_int(options.get("aggression"), 3, 1, 4)
+
+        result = await self.executor.run_args(["whatweb", "-a", str(aggression), "--color=never", target], timeout=120)
         
         parsed = self._parse_whatweb(result.stdout) if result.return_code == 0 else None
         
@@ -220,7 +258,7 @@ class WebEnumModule:
             "action": "whatweb",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -237,17 +275,17 @@ class WebEnumModule:
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
         
-        target_safe = escape_shell_arg(target)
-        enumerate = options.get("enumerate", "vp,vt,u")  # plugins, themes, users
-        
-        cmd = f"wpscan --url {target_safe} --enumerate {enumerate} --no-banner"
-        
+        target_safe = target
+        enumerate = self._sanitize_enum(options.get("enumerate"), "vp,vt,u")  # plugins, themes, users
+
+        command_args = ["wpscan", "--url", target_safe, "--enumerate", enumerate, "--no-banner"]
+
         # Ajouter l'API token si disponible
         api_token = options.get("api_token")
         if api_token:
-            cmd += f" --api-token {api_token}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+            command_args.extend(["--api-token", str(api_token)])
+
+        result = await self.executor.run_args(command_args, timeout=600)
         
         parsed = self._parse_wpscan(result.stdout) if result.return_code == 0 else None
         
@@ -255,7 +293,7 @@ class WebEnumModule:
             "action": "wpscan",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd.replace(api_token, "***") if api_token else cmd,
+            "command": result.command.replace(str(api_token), "***") if api_token else result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -270,11 +308,11 @@ class WebEnumModule:
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
         
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"curl -I -L -s -k {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=30)
+        target_safe = target
+
+        command_args = ["curl", "-I", "-L", "-s", "-k", target_safe]
+
+        result = await self.executor.run_args(command_args, timeout=30)
         
         parsed = self._parse_headers(result.stdout) if result.return_code == 0 else None
         
@@ -282,7 +320,7 @@ class WebEnumModule:
             "action": "curl_headers",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -300,7 +338,7 @@ class WebEnumModule:
         if not target.startswith(('http://', 'https://')):
             target = f"http://{target}"
         
-        target_safe = escape_shell_arg(target)
+        target_safe = target
         
         # Nom de fichier basé sur la cible
         safe_filename = re.sub(r'[^\w\-_.]', '_', target.replace('://', '_'))
@@ -308,9 +346,9 @@ class WebEnumModule:
         
         # Essayer cutycapt ou wkhtmltoimage
         if self.executor.check_tool_available("cutycapt"):
-            cmd = f"cutycapt --url={target_safe} --out={output_file}"
+            command_args = ["cutycapt", f"--url={target_safe}", f"--out={output_file}"]
         elif self.executor.check_tool_available("wkhtmltoimage"):
-            cmd = f"wkhtmltoimage --quality 80 {target_safe} {output_file}"
+            command_args = ["wkhtmltoimage", "--quality", "80", target_safe, output_file]
         else:
             return {
                 "action": "screenshot",
@@ -320,13 +358,13 @@ class WebEnumModule:
                 "timestamp": datetime.now().isoformat()
             }
         
-        result = await self.executor.run(cmd, timeout=60)
+        result = await self.executor.run_args(command_args, timeout=60)
         
         return {
             "action": "screenshot",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": output_file if result.return_code == 0 else None,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,

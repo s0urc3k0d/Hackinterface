@@ -9,6 +9,7 @@ from datetime import datetime
 from core.executor import CommandExecutor, escape_shell_arg
 import json
 import re
+import shlex
 
 
 class NetExecModule:
@@ -23,6 +24,10 @@ class NetExecModule:
     
     def __init__(self):
         self.executor = CommandExecutor()
+
+    async def _run_cmd(self, cmd: str, timeout: int):
+        """Exécute la commande via argv (sans shell)"""
+        return await self.executor.run_args(shlex.split(cmd), timeout=timeout)
     
     async def smb_enum(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -56,7 +61,7 @@ class NetExecModule:
         
         cmd = f"nxc smb {target_safe} {auth} {extra_flags}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         # Parser les résultats
         parsed = self._parse_smb_output(result.stdout)
@@ -125,7 +130,7 @@ class NetExecModule:
         
         cmd = f"nxc smb {target_safe} {auth} {extra}"
         
-        result = await self.executor.run(cmd, timeout=600)
+        result = await self._run_cmd(cmd, timeout=600)
         
         # Chercher les credentials valides
         valid_creds = self._parse_valid_creds(result.stdout)
@@ -155,7 +160,7 @@ class NetExecModule:
         
         cmd = f"nxc winrm {target_safe} {auth}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         # Vérifier si WinRM est accessible
         winrm_enabled = "Pwn3d!" in result.stdout or "[+]" in result.stdout
@@ -188,7 +193,7 @@ class NetExecModule:
         
         cmd = f"nxc winrm {target_safe} {auth} -x '{command_safe}'"
         
-        result = await self.executor.run(cmd, timeout=120)
+        result = await self._run_cmd(cmd, timeout=120)
         
         return {
             "action": "netexec_winrm_exec",
@@ -215,7 +220,7 @@ class NetExecModule:
         
         cmd = f"nxc ssh {target_safe} {auth}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         return {
             "action": "netexec_ssh",
@@ -260,7 +265,7 @@ class NetExecModule:
         
         cmd = f"nxc ldap {target_safe} {auth} {extra}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         return {
             "action": "netexec_ldap",
@@ -289,7 +294,7 @@ class NetExecModule:
         
         cmd = f"nxc mssql {target_safe} {auth} {extra}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         return {
             "action": "netexec_mssql",
@@ -322,7 +327,7 @@ class NetExecModule:
         
         cmd = f"nxc rdp {target_safe} {auth} {extra}"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         return {
             "action": "netexec_rdp",
@@ -349,7 +354,7 @@ class NetExecModule:
         
         cmd = f"nxc smb {target_safe} {auth} --sam"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         # Parser les hashes
         hashes = self._parse_sam_hashes(result.stdout)
@@ -379,7 +384,7 @@ class NetExecModule:
         
         cmd = f"nxc smb {target_safe} {auth} --lsa"
         
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self._run_cmd(cmd, timeout=300)
         
         return {
             "action": "netexec_lsa",

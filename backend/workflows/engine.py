@@ -4,6 +4,7 @@ Gère l'exécution des workflows prédéfinis et personnalisés
 avec enchaînement automatique basé sur les découvertes
 """
 import asyncio
+import inspect
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 
@@ -17,6 +18,12 @@ from modules.metasploit import MetasploitModule
 from modules.network import NetworkModule
 from modules.osint import OSINTModule
 from modules.web_advanced import WebAdvancedModule
+from modules.netexec import NetExecModule
+from modules.impacket import ImpacketModule
+from modules.bloodhound import BloodHoundModule
+from modules.kerbrute import KerbruteModule
+from modules.evilwinrm import EvilWinRMModule
+from modules.peas import PEASModule
 
 class WorkflowEngine:
     """Moteur d'exécution de workflows"""
@@ -31,6 +38,12 @@ class WorkflowEngine:
         self.network = NetworkModule()
         self.osint = OSINTModule()
         self.web_advanced = WebAdvancedModule()
+        self.netexec = NetExecModule()
+        self.impacket = ImpacketModule()
+        self.bloodhound = BloodHoundModule()
+        self.kerbrute = KerbruteModule()
+        self.evilwinrm = EvilWinRMModule()
+        self.peas = PEASModule()
         
         # Mapping des actions vers les fonctions
         self.action_map = {
@@ -82,6 +95,9 @@ class WorkflowEngine:
             "sherlock": self.osint.sherlock,
             "wafw00f": self.osint.wafw00f,
             "exiftool": self.osint.exiftool,
+            "subfinder": self.osint.subfinder,
+            "httpx": self.osint.httpx_probe,
+            "subfinder_httpx": self.osint.subfinder_httpx,
             # Web Advanced
             "sqlmap": self.web_advanced.sqlmap_url,
             "ffuf_dir": self.web_advanced.ffuf_dir,
@@ -101,6 +117,55 @@ class WorkflowEngine:
             "msf_http_version": self.metasploit.http_version,
             "msf_mysql_login": self.metasploit.mysql_login,
             "msf_postgres_login": self.metasploit.postgres_login,
+            # NetExec
+            "nxc_smb": self.netexec.smb_enum,
+            "nxc_smb_shares": self.netexec.smb_shares,
+            "nxc_smb_users": self.netexec.smb_users,
+            "nxc_spray": self.netexec.smb_pass_spray,
+            "nxc_winrm": self.netexec.winrm_enum,
+            "nxc_winrm_exec": self.netexec.winrm_exec,
+            "nxc_ssh": self.netexec.ssh_enum,
+            "nxc_ldap": self.netexec.ldap_enum,
+            "nxc_mssql": self.netexec.mssql_enum,
+            "nxc_rdp": self.netexec.rdp_enum,
+            "nxc_sam": self.netexec.dump_sam,
+            "nxc_lsa": self.netexec.dump_lsa,
+            # Impacket
+            "secretsdump": self.impacket.secretsdump,
+            "kerberoasting": self.impacket.getuserspns,
+            "asreproasting": self.impacket.getnpusers,
+            "psexec": self.impacket.psexec,
+            "wmiexec": self.impacket.wmiexec,
+            "smbexec": self.impacket.smbexec,
+            "dcomexec": self.impacket.dcomexec,
+            "atexec": self.impacket.atexec,
+            "lookupsid": self.impacket.lookupsid,
+            "getTGT": self.impacket.gettgt,
+            "getST": self.impacket.getst,
+            # BloodHound
+            "bloodhound": self.bloodhound.bloodhound_python,
+            "bloodhound_dns": self.bloodhound.bloodhound_dns,
+            "sharphound": self.bloodhound.sharphound_run,
+            # Kerbrute
+            "kerbrute_userenum": self.kerbrute.userenum,
+            "kerbrute_spray": self.kerbrute.passwordspray,
+            "kerbrute_brute": self.kerbrute.bruteforce,
+            # Evil-WinRM
+            "evilwinrm_check": self.evilwinrm.check_access,
+            "evilwinrm_exec": self.evilwinrm.execute_command,
+            "evilwinrm_upload": self.evilwinrm.upload_file,
+            "evilwinrm_download": self.evilwinrm.download_file,
+            "evilwinrm_mimikatz": self.evilwinrm.run_mimikatz,
+            "evilwinrm_amsi": self.evilwinrm.bypass_amsi,
+            # PEAS / Privesc
+            "linpeas": self.peas.linpeas_local,
+            "linpeas_remote": self.peas.linpeas_remote,
+            "winpeas": self.peas.winpeas_via_evilwinrm,
+            "winpeas_cmd": self.peas.winpeas_generate_command,
+            "lse": self.peas.lse,
+            "pspy": self.peas.pspy,
+            "suid_search": self.peas.suid_search,
+            "creds_search": self.peas.creds_search,
         }
         
         # Définition des workflows prédéfinis
@@ -336,6 +401,49 @@ class WorkflowEngine:
                 ],
                 "auto_chain": True
             },
+            "ad_enum_advanced": {
+                "id": "ad_enum_advanced",
+                "name": "AD Enumeration Advanced",
+                "description": "Énumération Active Directory avancée (NXC, Kerbrute, BloodHound)",
+                "target_types": ["ip", "domain", "fqdn"],
+                "steps": [
+                    {"action": "nmap_quick", "name": "AD Port Discovery", "options": {"ports": "53,88,135,139,389,445,464,636,3268,3269,5985,5986"}},
+                    {"action": "nxc_smb", "name": "NetExec SMB Enumeration", "condition": "has_smb"},
+                    {"action": "nxc_ldap", "name": "NetExec LDAP Enumeration", "condition": "has_ldap"},
+                    {"action": "kerbrute_userenum", "name": "Kerbrute User Enumeration", "condition": "has_kerberos"},
+                    {"action": "lookupsid", "name": "Impacket LookupSID", "condition": "has_smb"},
+                    {"action": "bloodhound", "name": "BloodHound Collection", "condition": "has_ldap"},
+                ],
+                "auto_chain": True
+            },
+            "windows_post_exploit": {
+                "id": "windows_post_exploit",
+                "name": "Windows Post-Exploitation",
+                "description": "Chaîne post-exploitation Windows (WinRM/SMB/Kerberos)",
+                "target_types": ["ip", "fqdn"],
+                "steps": [
+                    {"action": "nmap_quick", "name": "Service Discovery", "options": {"ports": "88,135,139,445,3389,5985,5986"}},
+                    {"action": "evilwinrm_check", "name": "WinRM Access Check", "condition": "has_winrm"},
+                    {"action": "evilwinrm_exec", "name": "WinRM Command Execution", "condition": "has_winrm", "options": {"command": "whoami /all"}},
+                    {"action": "winpeas", "name": "WinPEAS via WinRM", "condition": "has_winrm"},
+                    {"action": "secretsdump", "name": "Impacket SecretsDump", "condition": "has_smb"},
+                ],
+                "auto_chain": False
+            },
+            "linux_privesc": {
+                "id": "linux_privesc",
+                "name": "Linux Privesc Deep",
+                "description": "Chaîne d'énumération privesc Linux approfondie",
+                "target_types": ["ip", "fqdn"],
+                "steps": [
+                    {"action": "linpeas_remote", "name": "LinPEAS Remote"},
+                    {"action": "lse", "name": "Linux Smart Enumeration"},
+                    {"action": "pspy", "name": "Process Monitoring", "options": {"duration": 90}},
+                    {"action": "suid_search", "name": "SUID/SGID Search"},
+                    {"action": "creds_search", "name": "Credentials Search"},
+                ],
+                "auto_chain": False
+            },
         }
     
     def get_available_workflows(self) -> List[Dict[str, Any]]:
@@ -351,6 +459,26 @@ class WorkflowEngine:
             }
             for w in self.workflows.values()
         ]
+
+    async def _invoke_action(self, action: str, target_value: str, step_options: Dict[str, Any]):
+        """Exécute une action en tenant compte de sa signature (avec ou sans options)."""
+        if action not in self.action_map:
+            raise KeyError(f"Action inconnue: {action}")
+
+        action_func = self.action_map[action]
+        params = list(inspect.signature(action_func).parameters.values())
+
+        if len(params) <= 1:
+            return await action_func(target_value)
+
+        second_param = params[1]
+        if second_param.name == "options":
+            return await action_func(target_value, step_options)
+
+        if second_param.default is inspect._empty:
+            return await action_func(target_value, step_options)
+
+        return await action_func(target_value)
     
     async def execute(
         self,
@@ -371,6 +499,17 @@ class WorkflowEngine:
         target_id = target["id"]
         target_value = target["value"]
         target_type = target["type"]
+
+        if target_type not in workflow.get("target_types", []):
+            await ws_manager.send_log(
+                "error",
+                f"Type de cible '{target_type}' non supporté par ce workflow ({', '.join(workflow.get('target_types', []))})"
+            )
+            await ws_manager.send_workflow_update(
+                workflow_id=workflow_id,
+                status="failed"
+            )
+            return
         
         await ws_manager.send_workflow_update(
             workflow_id=workflow_id,
@@ -408,7 +547,7 @@ class WorkflowEngine:
             
             try:
                 if action in self.action_map:
-                    result = await self.action_map[action](target_value, step_options)
+                    result = await self._invoke_action(action, target_value, step_options)
                     results_store[target_id][action] = result
                     executed_actions.append(action)
                     
@@ -485,7 +624,7 @@ class WorkflowEngine:
             
             try:
                 if action in self.action_map:
-                    result = await self.action_map[action](target_value, {})
+                    result = await self._invoke_action(action, target_value, {})
                     results_store[target_id][action] = result
                     
                     await ws_manager.send_action_update(
@@ -747,7 +886,7 @@ class WorkflowEngine:
                     additional_actions.append(("msf_ftp_version", {}))
                 # Vérifier si anonymous login possible
                 if "anonymous" in version.lower() or "anonymous" in str(service.get("scripts", [])).lower():
-                    additional_actions.append(("ftp_anonymous", {}))
+                    additional_actions.append(("nmap_vuln", {"ports": "21"}))
             
             # SMB / Windows
             if port in [139, 445] or "smb" in svc or "microsoft-ds" in svc or "netbios" in svc:
@@ -762,9 +901,9 @@ class WorkflowEngine:
             
             # RDP
             if port == 3389 or "rdp" in svc or "ms-wbt-server" in svc:
-                if "nmap_rdp" not in already_executed:
+                if "nmap_vuln" not in already_executed:
                     # Scan RDP spécifique avec scripts NSE
-                    additional_actions.append(("nmap_quick", {"ports": "3389", "scripts": "rdp-*"}))
+                    additional_actions.append(("nmap_vuln", {"ports": "3389"}))
             
             # LDAP / Active Directory
             if port in [389, 636, 3268, 3269] or "ldap" in svc:
@@ -844,7 +983,7 @@ class WorkflowEngine:
                 await ws_manager.send_log("info", f"⚡ Auto-chain: {action}")
                 
                 try:
-                    result = await self.action_map[action](target_value, options)
+                    result = await self._invoke_action(action, target_value, options)
                     results_store[target_id][action] = result
                     already_executed.append(action)
                     

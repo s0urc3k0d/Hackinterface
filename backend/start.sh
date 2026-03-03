@@ -55,9 +55,9 @@ done
 
 echo ""
 echo -e "${GREEN}[+] Démarrage de HackInterface...${NC}"
-echo -e "${BLUE}[*] Interface disponible sur: http://127.0.0.1:8443${NC}"
+echo -e "${BLUE}[*] Interface disponible sur: http://127.0.0.1:8080${NC}"
 echo -e "${YELLOW}[*] Appuyez sur Ctrl+C pour arrêter${NC}"
 echo ""
 
 # Lancer l'application
-python3 -m uvicorn main:app --host 0.0.0.0 --port 8443 --reload
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload

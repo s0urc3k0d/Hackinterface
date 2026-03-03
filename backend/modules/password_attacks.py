@@ -7,7 +7,7 @@ import os
 from typing import Dict, Any, List
 from datetime import datetime
 
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 from core.config import settings
 
 
@@ -21,22 +21,37 @@ class PasswordAttacksModule:
         self.default_userlist = "/usr/share/wordlists/seclists/Usernames/top-usernames-shortlist.txt"
         self.default_passlist = "/usr/share/wordlists/rockyou.txt"
         self.small_passlist = "/usr/share/wordlists/seclists/Passwords/Common-Credentials/10-million-password-list-top-1000.txt"
+
+    def _sanitize_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(parsed, maximum))
+
+    def _sanitize_path(self, value: Any, default: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            return default
+        return value.strip()
     
     async def hydra_ssh(self, target: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Brute-force SSH avec Hydra
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        userlist = options.get("userlist", self.default_userlist)
-        passlist = options.get("passlist", self.small_passlist)
-        port = options.get("port", 22)
-        threads = options.get("threads", 4)
-        
-        cmd = f"hydra -L {userlist} -P {passlist} -s {port} -t {threads} -f {target_safe} ssh -o /tmp/hydra_ssh_{target_safe}.txt"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        userlist = self._sanitize_path(options.get("userlist"), self.default_userlist)
+        passlist = self._sanitize_path(options.get("passlist"), self.small_passlist)
+        port = self._sanitize_int(options.get("port"), 22, 1, 65535)
+        threads = self._sanitize_int(options.get("threads"), 4, 1, 64)
+        output_file = f"/tmp/hydra_ssh_{re.sub(r'[^a-zA-Z0-9_.-]', '_', target)}.txt"
+
+        command_args = [
+            "hydra", "-L", userlist, "-P", passlist,
+            "-s", str(port), "-t", str(threads), "-f",
+            target, "ssh", "-o", output_file
+        ]
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         
         parsed = self._parse_hydra_output(result.stdout)
         
@@ -44,7 +59,7 @@ class PasswordAttacksModule:
             "action": "hydra_ssh",
             "target": target,
             "status": "completed" if result.return_code in [0, 1] else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code not in [0, 1] else None,
             "duration": result.duration,
@@ -57,23 +72,25 @@ class PasswordAttacksModule:
         Brute-force FTP avec Hydra
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        userlist = options.get("userlist", self.default_userlist)
-        passlist = options.get("passlist", self.small_passlist)
-        port = options.get("port", 21)
-        threads = options.get("threads", 4)
-        
-        cmd = f"hydra -L {userlist} -P {passlist} -s {port} -t {threads} -f {target_safe} ftp"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        userlist = self._sanitize_path(options.get("userlist"), self.default_userlist)
+        passlist = self._sanitize_path(options.get("passlist"), self.small_passlist)
+        port = self._sanitize_int(options.get("port"), 21, 1, 65535)
+        threads = self._sanitize_int(options.get("threads"), 4, 1, 64)
+
+        command_args = [
+            "hydra", "-L", userlist, "-P", passlist,
+            "-s", str(port), "-t", str(threads), "-f",
+            target, "ftp"
+        ]
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         parsed = self._parse_hydra_output(result.stdout)
         
         return {
             "action": "hydra_ftp",
             "target": target,
             "status": "completed" if result.return_code in [0, 1] else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code not in [0, 1] else None,
             "duration": result.duration,
@@ -86,30 +103,31 @@ class PasswordAttacksModule:
         Brute-force formulaire HTTP POST avec Hydra
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        userlist = options.get("userlist", self.default_userlist)
-        passlist = options.get("passlist", self.small_passlist)
+        userlist = self._sanitize_path(options.get("userlist"), self.default_userlist)
+        passlist = self._sanitize_path(options.get("passlist"), self.small_passlist)
         path = options.get("path", "/login")
         user_field = options.get("user_field", "username")
         pass_field = options.get("pass_field", "password")
         fail_string = options.get("fail_string", "Invalid")
-        port = options.get("port", 80)
+        port = self._sanitize_int(options.get("port"), 80, 1, 65535)
         ssl = options.get("ssl", False)
         
         protocol = "https-post-form" if ssl else "http-post-form"
         form_data = f"{path}:{user_field}=^USER^&{pass_field}=^PASS^:F={fail_string}"
         
-        cmd = f"hydra -L {userlist} -P {passlist} -s {port} {target_safe} {protocol} '{form_data}'"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        command_args = [
+            "hydra", "-L", userlist, "-P", passlist,
+            "-s", str(port), target, protocol, form_data
+        ]
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         parsed = self._parse_hydra_output(result.stdout)
         
         return {
             "action": "hydra_http_post",
             "target": target,
             "status": "completed" if result.return_code in [0, 1] else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code not in [0, 1] else None,
             "duration": result.duration,
@@ -122,21 +140,19 @@ class PasswordAttacksModule:
         Brute-force SMB avec Hydra
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        userlist = options.get("userlist", self.default_userlist)
-        passlist = options.get("passlist", self.small_passlist)
-        
-        cmd = f"hydra -L {userlist} -P {passlist} -t 1 {target_safe} smb"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        userlist = self._sanitize_path(options.get("userlist"), self.default_userlist)
+        passlist = self._sanitize_path(options.get("passlist"), self.small_passlist)
+
+        command_args = ["hydra", "-L", userlist, "-P", passlist, "-t", "1", target, "smb"]
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         parsed = self._parse_hydra_output(result.stdout)
         
         return {
             "action": "hydra_smb",
             "target": target,
             "status": "completed" if result.return_code in [0, 1] else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code not in [0, 1] else None,
             "duration": result.duration,
@@ -149,21 +165,19 @@ class PasswordAttacksModule:
         Brute-force RDP avec Hydra
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        userlist = options.get("userlist", self.default_userlist)
-        passlist = options.get("passlist", self.small_passlist)
-        
-        cmd = f"hydra -L {userlist} -P {passlist} -t 1 {target_safe} rdp"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        userlist = self._sanitize_path(options.get("userlist"), self.default_userlist)
+        passlist = self._sanitize_path(options.get("passlist"), self.small_passlist)
+
+        command_args = ["hydra", "-L", userlist, "-P", passlist, "-t", "1", target, "rdp"]
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         parsed = self._parse_hydra_output(result.stdout)
         
         return {
             "action": "hydra_rdp",
             "target": target,
             "status": "completed" if result.return_code in [0, 1] else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code not in [0, 1] else None,
             "duration": result.duration,
@@ -175,18 +189,14 @@ class PasswordAttacksModule:
         """
         Identifier le type d'un hash
         """
-        hash_safe = escape_shell_arg(hash_value)
-        
-        cmd = f"hashid -m '{hash_safe}'"
-        
-        result = await self.executor.run(cmd, timeout=30)
+        result = await self.executor.run_args(["hashid", "-m", hash_value], timeout=30)
         parsed = self._parse_hashid(result.stdout)
         
         return {
             "action": "hashid",
             "target": hash_value[:20] + "..." if len(hash_value) > 20 else hash_value,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -200,17 +210,18 @@ class PasswordAttacksModule:
         """
         options = options or {}
         
-        wordlist = options.get("wordlist", self.small_passlist)
+        wordlist = self._sanitize_path(options.get("wordlist"), self.small_passlist)
         format_type = options.get("format", "")
-        
-        format_arg = f"--format={format_type}" if format_type else ""
-        cmd = f"john --wordlist={wordlist} {format_arg} {hash_file}"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+
+        command_args = ["john", f"--wordlist={wordlist}"]
+        if format_type:
+            command_args.append(f"--format={format_type}")
+        command_args.append(hash_file)
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         
         # Récupérer les résultats crackés
-        show_cmd = f"john --show {hash_file}"
-        show_result = await self.executor.run(show_cmd, timeout=30)
+        show_result = await self.executor.run_args(["john", "--show", hash_file], timeout=30)
         
         parsed = self._parse_john_output(show_result.stdout)
         
@@ -218,7 +229,7 @@ class PasswordAttacksModule:
             "action": "john_crack",
             "target": hash_file,
             "status": "completed",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout + "\n\n=== Cracked ===\n" + show_result.stdout,
             "duration": result.duration,
             "timestamp": result.timestamp,
@@ -231,12 +242,15 @@ class PasswordAttacksModule:
         """
         options = options or {}
         
-        wordlist = options.get("wordlist", self.small_passlist)
-        hash_mode = options.get("mode", 0)  # 0 = MD5, 1000 = NTLM, etc.
-        
-        cmd = f"hashcat -m {hash_mode} -a 0 {hash_file} {wordlist} --potfile-disable -o /tmp/hashcat_cracked.txt"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        wordlist = self._sanitize_path(options.get("wordlist"), self.small_passlist)
+        hash_mode = self._sanitize_int(options.get("mode"), 0, 0, 100000)
+
+        command_args = [
+            "hashcat", "-m", str(hash_mode), "-a", "0", hash_file,
+            wordlist, "--potfile-disable", "-o", "/tmp/hashcat_cracked.txt"
+        ]
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         
         # Lire les résultats
         cracked = []
@@ -248,7 +262,7 @@ class PasswordAttacksModule:
             "action": "hashcat_crack",
             "target": hash_file,
             "status": "completed" if result.return_code in [0, 1] else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code not in [0, 1] else None,
             "duration": result.duration,
@@ -261,15 +275,14 @@ class PasswordAttacksModule:
         Générer une wordlist depuis un site web avec CeWL
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        depth = options.get("depth", 2)
-        min_length = options.get("min_length", 6)
-        output_file = f"/tmp/cewl_{target_safe.replace('/', '_').replace(':', '_')}.txt"
-        
-        cmd = f"cewl -d {depth} -m {min_length} -w {output_file} {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+
+        depth = self._sanitize_int(options.get("depth"), 2, 1, 10)
+        min_length = self._sanitize_int(options.get("min_length"), 6, 1, 32)
+        output_file = f"/tmp/cewl_{re.sub(r'[^a-zA-Z0-9_.-]', '_', target)}.txt"
+
+        command_args = ["cewl", "-d", str(depth), "-m", str(min_length), "-w", output_file, target]
+
+        result = await self.executor.run_args(command_args, timeout=300)
         
         # Compter les mots générés
         word_count = 0
@@ -283,7 +296,7 @@ class PasswordAttacksModule:
             "action": "cewl",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,

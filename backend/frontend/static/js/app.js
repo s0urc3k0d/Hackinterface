@@ -14,6 +14,14 @@ let results = {};
 let availableActions = {};
 let availableWorkflows = [];
 let currentSessionId = null;
+let currentSessionKey = '';
+let currentApiToken = '';
+
+const SESSION_KEY_STORAGE_KEY = 'hackinterface_session_key';
+const API_TOKEN_STORAGE_KEY = 'hackinterface_api_token';
+const SESSION_KEY_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
+const nativeFetch = window.fetch.bind(window);
+let fetchInterceptorInstalled = false;
 
 // Instances Chart.js
 let vulnSeverityChart = null;
@@ -181,7 +189,8 @@ const notificationManager = new NotificationManager();
 // Initialisation
 // ============================================
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    await bootstrapNetworkContext();
     initWebSocket();
     initNavigation();
     initVpnUpload();
@@ -189,6 +198,87 @@ document.addEventListener('DOMContentLoaded', () => {
     initTerminalToggle();
     initNotifications();
 });
+
+function isValidSessionKey(value) {
+    return typeof value === 'string' && SESSION_KEY_REGEX.test(value.trim());
+}
+
+function setSessionKey(value) {
+    if (!isValidSessionKey(value)) return;
+    currentSessionKey = value.trim();
+    localStorage.setItem(SESSION_KEY_STORAGE_KEY, currentSessionKey);
+}
+
+function getApiTokenFromSources() {
+    const fromStorage = localStorage.getItem(API_TOKEN_STORAGE_KEY) || '';
+    const fromQuery = new URLSearchParams(window.location.search).get('api_token') || '';
+    const token = (fromQuery || fromStorage).trim();
+    if (fromQuery) {
+        localStorage.setItem(API_TOKEN_STORAGE_KEY, token);
+    }
+    return token;
+}
+
+function installFetchInterceptor() {
+    if (fetchInterceptorInstalled) return;
+
+    window.fetch = async (input, init = {}) => {
+        const request = input instanceof Request ? input : null;
+        const headers = new Headers(init.headers || (request ? request.headers : undefined));
+
+        if (currentSessionKey) {
+            headers.set('X-Session-Key', currentSessionKey);
+        }
+
+        if (currentApiToken && !headers.has('Authorization') && !headers.has('X-API-Key')) {
+            headers.set('Authorization', `Bearer ${currentApiToken}`);
+        }
+
+        let finalInput = input;
+        let finalInit = { ...init, headers };
+
+        if (request) {
+            finalInput = new Request(request, finalInit);
+            finalInit = undefined;
+        }
+
+        const response = await nativeFetch(finalInput, finalInit);
+        const serverSessionKey = response.headers.get('X-Session-Key');
+        if (isValidSessionKey(serverSessionKey)) {
+            setSessionKey(serverSessionKey);
+        }
+
+        return response;
+    };
+
+    fetchInterceptorInstalled = true;
+}
+
+async function bootstrapNetworkContext() {
+    const querySessionKey = new URLSearchParams(window.location.search).get('session_key') || '';
+    const storedSessionKey = localStorage.getItem(SESSION_KEY_STORAGE_KEY) || '';
+
+    if (isValidSessionKey(querySessionKey)) {
+        setSessionKey(querySessionKey);
+    } else if (isValidSessionKey(storedSessionKey)) {
+        setSessionKey(storedSessionKey);
+    }
+
+    currentApiToken = getApiTokenFromSources();
+    installFetchInterceptor();
+
+    try {
+        const response = await fetch(`${API_BASE}/api/session/context`);
+        if (response.ok) {
+            const context = await response.json();
+            if (isValidSessionKey(context.session_key)) {
+                setSessionKey(context.session_key);
+            }
+        }
+    } catch (error) {
+        console.warn('Impossible de récupérer le contexte de session:', error);
+    }
+}
 
 // ============================================
 // Initialisation des Notifications
@@ -254,7 +344,17 @@ function updateNotificationButton(enabled) {
 
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const wsParams = new URLSearchParams();
+    if (currentSessionKey) {
+        wsParams.set('session_key', currentSessionKey);
+    }
+    if (currentApiToken) {
+        wsParams.set('token', currentApiToken);
+    }
+    const wsQuery = wsParams.toString();
+    const wsUrl = `${protocol}//${window.location.host}/ws${wsQuery ? `?${wsQuery}` : ''}`;
+
+    ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
         console.log('WebSocket connecté');

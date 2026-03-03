@@ -16,6 +16,18 @@ class Settings:
     # Serveur - Port 8080 pour compatibilité GitHub Codespaces
     PORT = 8080
     HOST = "0.0.0.0"
+    ALLOWED_ORIGINS = [
+        origin.strip()
+        for origin in os.getenv(
+            "ALLOWED_ORIGINS",
+            "http://127.0.0.1:8080,http://localhost:8080"
+        ).split(",")
+        if origin.strip()
+    ]
+    API_TOKEN = os.getenv("API_TOKEN", "").strip()
+    REQUIRE_API_AUTH = os.getenv("REQUIRE_API_AUTH", "false").lower() in {
+        "1", "true", "yes", "on"
+    } or bool(API_TOKEN)
     
     # VPN
     VPN_CONFIG_PATH = os.path.join(UPLOAD_DIR, "current.ovpn")

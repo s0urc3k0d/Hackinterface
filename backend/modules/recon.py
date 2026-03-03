@@ -3,11 +3,13 @@ Module de Reconnaissance
 Nmap, Whois, DNS, Sous-domaines
 """
 import re
+import tempfile
+import os
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 from core.config import settings
 from core.cache import cache
 from models.schemas import ActionResult, ActionStatus
@@ -36,6 +38,8 @@ class ReconModule:
         Scan Nmap rapide - Top 1000 ports
         """
         options = options or {}
+        ports = options.get("ports", "")
+        scripts = options.get("scripts", "")
         
         # Vérifier le cache (sauf si force_refresh)
         if not options.get("force_refresh"):
@@ -43,12 +47,20 @@ class ReconModule:
             if cached:
                 return cached
         
-        target_safe = escape_shell_arg(target)
-        
-        # Construire la commande
-        cmd = f"nmap -sV -sC -T4 --top-ports 1000 -oX - {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+        command_args = ["nmap", "-sV", "-T4"]
+        if scripts:
+            command_args.extend(["--script", str(scripts)])
+        else:
+            command_args.append("-sC")
+
+        if ports:
+            command_args.extend(["-p", str(ports)])
+        else:
+            command_args.extend(["--top-ports", "1000"])
+
+        command_args.extend(["-oX", "-", target])
+
+        result = await self.executor.run_args(command_args, timeout=600)
         
         parsed = self._parse_nmap_xml(result.stdout) if result.return_code == 0 else None
         
@@ -56,7 +68,7 @@ class ReconModule:
             "action": "nmap_quick",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -81,11 +93,9 @@ class ReconModule:
             if cached:
                 return cached
         
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"nmap -sV -sC -p- -T4 -oX - {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=3600)
+        command_args = ["nmap", "-sV", "-sC", "-p-", "-T4", "-oX", "-", target]
+
+        result = await self.executor.run_args(command_args, timeout=3600)
         
         parsed = self._parse_nmap_xml(result.stdout) if result.return_code == 0 else None
         
@@ -93,7 +103,7 @@ class ReconModule:
             "action": "nmap_full",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -106,15 +116,14 @@ class ReconModule:
         Scan Nmap avec scripts de vulnérabilités
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
         ports = options.get("ports", "")
-        
+
+        command_args = ["nmap", "-sV", "--script=vuln"]
         if ports:
-            cmd = f"nmap -sV --script=vuln -p {ports} -oX - {target_safe}"
-        else:
-            cmd = f"nmap -sV --script=vuln -oX - {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+            command_args.extend(["-p", str(ports)])
+        command_args.extend(["-oX", "-", target])
+
+        result = await self.executor.run_args(command_args, timeout=1800)
         
         parsed = self._parse_nmap_xml(result.stdout) if result.return_code == 0 else None
         
@@ -122,7 +131,7 @@ class ReconModule:
             "action": "nmap_vuln",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -135,11 +144,9 @@ class ReconModule:
         Scan Nmap UDP
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
-        cmd = f"sudo nmap -sU -sV --top-ports 100 -T4 -oX - {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=1800)
+        command_args = ["sudo", "nmap", "-sU", "-sV", "--top-ports", "100", "-T4", "-oX", "-", target]
+
+        result = await self.executor.run_args(command_args, timeout=1800)
         
         parsed = self._parse_nmap_xml(result.stdout) if result.return_code == 0 else None
         
@@ -147,7 +154,7 @@ class ReconModule:
             "action": "nmap_udp",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -159,10 +166,9 @@ class ReconModule:
         """
         Recherche WHOIS
         """
-        target_safe = escape_shell_arg(target)
-        cmd = f"whois {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=30)
+        command_args = ["whois", target]
+
+        result = await self.executor.run_args(command_args, timeout=30)
         
         parsed = self._parse_whois(result.stdout) if result.return_code == 0 else None
         
@@ -170,7 +176,7 @@ class ReconModule:
             "action": "whois",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -182,24 +188,22 @@ class ReconModule:
         """
         Énumération DNS complète
         """
-        target_safe = escape_shell_arg(target)
-        
         # Plusieurs requêtes DNS
         commands = {
-            "A": f"dig +short A {target_safe}",
-            "AAAA": f"dig +short AAAA {target_safe}",
-            "MX": f"dig +short MX {target_safe}",
-            "NS": f"dig +short NS {target_safe}",
-            "TXT": f"dig +short TXT {target_safe}",
-            "SOA": f"dig +short SOA {target_safe}",
-            "CNAME": f"dig +short CNAME {target_safe}",
+            "A": ["dig", "+short", "A", target],
+            "AAAA": ["dig", "+short", "AAAA", target],
+            "MX": ["dig", "+short", "MX", target],
+            "NS": ["dig", "+short", "NS", target],
+            "TXT": ["dig", "+short", "TXT", target],
+            "SOA": ["dig", "+short", "SOA", target],
+            "CNAME": ["dig", "+short", "CNAME", target],
         }
         
         results = {}
         full_output = []
         
         for record_type, cmd in commands.items():
-            result = await self.executor.run(cmd, timeout=15)
+            result = await self.executor.run_args(cmd, timeout=15)
             results[record_type] = result.stdout.strip().split('\n') if result.stdout.strip() else []
             full_output.append(f"=== {record_type} Records ===\n{result.stdout}")
         
@@ -208,8 +212,8 @@ class ReconModule:
         if ns_servers:
             for ns in ns_servers[:2]:  # Essayer les 2 premiers NS
                 ns_clean = ns.rstrip('.')
-                axfr_cmd = f"dig @{ns_clean} {target_safe} AXFR"
-                axfr_result = await self.executor.run(axfr_cmd, timeout=30)
+                axfr_cmd = ["dig", f"@{ns_clean}", target, "AXFR"]
+                axfr_result = await self.executor.run_args(axfr_cmd, timeout=30)
                 full_output.append(f"=== Zone Transfer from {ns_clean} ===\n{axfr_result.stdout}")
                 if "XFR size" in axfr_result.stdout:
                     results["zone_transfer"] = {
@@ -234,15 +238,12 @@ class ReconModule:
         Énumération des sous-domaines avec plusieurs outils
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
-        
         subdomains = set()
         full_output = []
         
         # Subfinder
         if self.executor.check_tool_available("subfinder"):
-            cmd = f"subfinder -d {target_safe} -silent"
-            result = await self.executor.run(cmd, timeout=300)
+            result = await self.executor.run_args(["subfinder", "-d", target, "-silent"], timeout=300)
             if result.return_code == 0:
                 subs = [s.strip() for s in result.stdout.split('\n') if s.strip()]
                 subdomains.update(subs)
@@ -250,8 +251,7 @@ class ReconModule:
         
         # Amass (passif)
         if self.executor.check_tool_available("amass"):
-            cmd = f"amass enum -passive -d {target_safe}"
-            result = await self.executor.run(cmd, timeout=600)
+            result = await self.executor.run_args(["amass", "enum", "-passive", "-d", target], timeout=600)
             if result.return_code == 0:
                 subs = [s.strip() for s in result.stdout.split('\n') if s.strip()]
                 subdomains.update(subs)
@@ -260,14 +260,24 @@ class ReconModule:
         # Vérification des sous-domaines avec httpx
         live_subdomains = []
         if subdomains and self.executor.check_tool_available("httpx"):
-            subs_list = '\n'.join(subdomains)
-            cmd = f"echo '{subs_list}' | httpx -silent -status-code -title"
-            result = await self.executor.run(cmd, timeout=300)
-            if result.return_code == 0:
-                for line in result.stdout.split('\n'):
-                    if line.strip():
-                        live_subdomains.append(line.strip())
-                full_output.append(f"=== Live Subdomains ===\n{result.stdout}")
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8", newline="\n") as tmp:
+                    tmp.write("\n".join(sorted(subdomains)))
+                    tmp_path = tmp.name
+
+                result = await self.executor.run_args(
+                    ["httpx", "-silent", "-status-code", "-title", "-l", tmp_path],
+                    timeout=300
+                )
+                if result.return_code == 0:
+                    for line in result.stdout.split('\n'):
+                        if line.strip():
+                            live_subdomains.append(line.strip())
+                    full_output.append(f"=== Live Subdomains ===\n{result.stdout}")
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
         
         return {
             "action": "subdomain_enum",

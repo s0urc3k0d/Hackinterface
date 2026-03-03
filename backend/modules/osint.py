@@ -3,10 +3,12 @@ Module OSINT et Information Gathering avancé
 """
 import re
 import json
+import os
+import tempfile
 from typing import Dict, Any, List
 from datetime import datetime
 
-from core.executor import CommandExecutor, escape_shell_arg
+from core.executor import CommandExecutor
 from core.config import settings
 
 
@@ -15,20 +17,43 @@ class OSINTModule:
     
     def __init__(self):
         self.executor = CommandExecutor()
+
+    def _sanitize_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(parsed, maximum))
+
+    def _sanitize_csv(self, value: Any, default: str, pattern: str) -> str:
+        if not isinstance(value, str):
+            return default
+        cleaned = value.strip().replace(" ", "")
+        if not cleaned:
+            return default
+        if not re.match(pattern, cleaned):
+            return default
+        return cleaned
+
+    def _safe_name(self, value: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9_.-]', '_', value)
     
     async def theharvester(self, domain: str, options: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Collecte d'emails et sous-domaines avec theHarvester
         """
         options = options or {}
-        domain_safe = escape_shell_arg(domain)
-        
-        sources = options.get("sources", "bing,google,linkedin,twitter,yahoo")
-        limit = options.get("limit", 500)
-        
-        cmd = f"theHarvester -d {domain_safe} -b {sources} -l {limit}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+
+        sources = self._sanitize_csv(
+            options.get("sources"),
+            "bing,google,linkedin,twitter,yahoo",
+            r'^[a-z,]+$'
+        )
+        limit = self._sanitize_int(options.get("limit"), 500, 1, 5000)
+
+        command_args = ["theHarvester", "-d", domain, "-b", sources, "-l", str(limit)]
+
+        result = await self.executor.run_args(command_args, timeout=300)
         
         parsed = self._parse_theharvester(result.stdout)
         
@@ -36,7 +61,7 @@ class OSINTModule:
             "action": "theharvester",
             "target": domain,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -49,15 +74,16 @@ class OSINTModule:
         Énumération de sous-domaines avec Amass
         """
         options = options or {}
-        domain_safe = escape_shell_arg(domain)
         
         passive = options.get("passive", True)
-        output_file = f"/tmp/amass_{domain_safe}_{int(datetime.now().timestamp())}.json"
-        
-        mode = "-passive" if passive else ""
-        cmd = f"amass enum {mode} -d {domain_safe} -json {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+        output_file = f"/tmp/amass_{self._safe_name(domain)}_{int(datetime.now().timestamp())}.json"
+
+        command_args = ["amass", "enum"]
+        if passive:
+            command_args.append("-passive")
+        command_args.extend(["-d", domain, "-json", output_file])
+
+        result = await self.executor.run_args(command_args, timeout=600)
         
         # Lire les résultats JSON
         subdomains = []
@@ -75,7 +101,7 @@ class OSINTModule:
             "action": "amass",
             "target": domain,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -90,8 +116,6 @@ class OSINTModule:
         """
         Exécuter des modules recon-ng
         """
-        domain_safe = escape_shell_arg(domain)
-        
         if not modules:
             modules = [
                 "recon/domains-hosts/bing_domain_web",
@@ -114,17 +138,15 @@ run
         rc_file = f"/tmp/reconng_{int(datetime.now().timestamp())}.rc"
         with open(rc_file, 'w') as f:
             f.write(rc_content)
-        
-        cmd = f"recon-ng -r {rc_file}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+
+        result = await self.executor.run_args(["recon-ng", "-r", rc_file], timeout=300)
         
         return {
             "action": "recon_ng",
             "target": domain,
             "modules": modules,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -136,21 +158,22 @@ run
         Scan OSINT avec SpiderFoot
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
+
+        target_safe = target
         
         modules = options.get("modules", "")
-        output_file = f"/tmp/spiderfoot_{int(datetime.now().timestamp())}.json"
-        
-        modules_arg = f"-m {modules}" if modules else ""
-        cmd = f"spiderfoot -s {target_safe} {modules_arg} -o json > {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+
+        command_args = ["spiderfoot", "-s", target_safe]
+        if modules:
+            command_args.extend(["-m", str(modules)])
+        command_args.extend(["-o", "json"])
+
+        result = await self.executor.run_args(command_args, timeout=600)
         
         # Lire les résultats
         parsed = {"results": []}
         try:
-            with open(output_file, 'r') as f:
-                parsed = json.load(f)
+            parsed = json.loads(result.stdout) if result.stdout.strip().startswith(("{", "[")) else parsed
         except:
             pass
         
@@ -158,7 +181,7 @@ run
             "action": "spiderfoot",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "duration": result.duration,
             "timestamp": result.timestamp,
@@ -169,11 +192,7 @@ run
         """
         Recherche de comptes sur les réseaux sociaux avec Sherlock
         """
-        username_safe = escape_shell_arg(username)
-        
-        cmd = f"sherlock {username_safe} --print-found"
-        
-        result = await self.executor.run(cmd, timeout=300)
+        result = await self.executor.run_args(["sherlock", username, "--print-found"], timeout=300)
         
         parsed = self._parse_sherlock(result.stdout)
         
@@ -181,7 +200,7 @@ run
             "action": "sherlock",
             "target": username,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -194,20 +213,21 @@ run
         Reconnaissance avec DMitry
         """
         options = options or {}
-        target_safe = escape_shell_arg(target)
+
+        target_safe = target
         
         # Options: -w (whois), -n (netcraft), -s (subdomains), -e (emails), -p (port scan)
-        flags = options.get("flags", "-wns")
-        
-        cmd = f"dmitry {flags} {target_safe}"
-        
-        result = await self.executor.run(cmd, timeout=180)
+        flags = str(options.get("flags", "-wns")).strip()
+        if not re.match(r'^-[a-zA-Z]+$', flags):
+            flags = "-wns"
+
+        result = await self.executor.run_args(["dmitry", flags, target_safe], timeout=180)
         
         return {
             "action": "dmitry",
             "target": target,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -262,9 +282,7 @@ run
         """
         Extraire les métadonnées avec exiftool
         """
-        cmd = f"exiftool -j '{file_path}'"
-        
-        result = await self.executor.run(cmd, timeout=60)
+        result = await self.executor.run_args(["exiftool", "-j", file_path], timeout=60)
         
         parsed = {}
         if result.return_code == 0:
@@ -277,7 +295,7 @@ run
             "action": "exiftool",
             "target": file_path,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -290,21 +308,26 @@ run
         Extraction de métadonnées de documents publics
         """
         options = options or {}
-        domain_safe = escape_shell_arg(domain)
+
+        domain_safe = self._safe_name(domain)
         
-        file_types = options.get("types", "pdf,doc,xls,ppt,docx,xlsx,pptx")
-        limit = options.get("limit", 50)
+        file_types = self._sanitize_csv(
+            options.get("types"),
+            "pdf,doc,xls,ppt,docx,xlsx,pptx",
+            r'^[a-zA-Z0-9,]+$'
+        )
+        limit = self._sanitize_int(options.get("limit"), 50, 1, 500)
         output_dir = options.get("output", f"/tmp/metagoofil_{domain_safe}")
-        
-        cmd = f"metagoofil -d {domain_safe} -t {file_types} -l {limit} -o {output_dir}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+
+        command_args = ["metagoofil", "-d", domain, "-t", file_types, "-l", str(limit), "-o", output_dir]
+
+        result = await self.executor.run_args(command_args, timeout=600)
         
         return {
             "action": "metagoofil",
             "target": domain,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "output_directory": output_dir,
@@ -316,11 +339,7 @@ run
         """
         Détection de WAF avec wafw00f
         """
-        url_safe = escape_shell_arg(url)
-        
-        cmd = f"wafw00f {url_safe}"
-        
-        result = await self.executor.run(cmd, timeout=60)
+        result = await self.executor.run_args(["wafw00f", url], timeout=60)
         
         parsed = self._parse_wafw00f(result.stdout)
         
@@ -328,7 +347,7 @@ run
             "action": "wafw00f",
             "target": url,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -398,16 +417,19 @@ run
         Énumération rapide de sous-domaines avec Subfinder
         """
         options = options or {}
-        domain_safe = escape_shell_arg(domain)
+
+        domain_safe = self._safe_name(domain)
         
         output_file = f"/tmp/subfinder_{domain_safe}_{int(datetime.now().timestamp())}.txt"
-        
-        silent = "-silent" if options.get("silent", True) else ""
-        recursive = "-recursive" if options.get("recursive", False) else ""
-        
-        cmd = f"subfinder -d {domain_safe} {silent} {recursive} -o {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=300)
+
+        command_args = ["subfinder", "-d", domain]
+        if options.get("silent", True):
+            command_args.append("-silent")
+        if options.get("recursive", False):
+            command_args.append("-recursive")
+        command_args.extend(["-o", output_file])
+
+        result = await self.executor.run_args(command_args, timeout=300)
         
         # Lire les résultats
         subdomains = []
@@ -421,7 +443,7 @@ run
             "action": "subfinder",
             "target": domain,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -438,13 +460,12 @@ run
         targets peut être une IP, domaine, ou fichier de liste
         """
         options = options or {}
-        targets_safe = escape_shell_arg(targets)
         
         output_file = f"/tmp/httpx_{int(datetime.now().timestamp())}.json"
         
         # Options httpx
-        threads = options.get("threads", 50)
-        timeout_sec = options.get("timeout", 10)
+        threads = self._sanitize_int(options.get("threads"), 50, 1, 500)
+        timeout_sec = self._sanitize_int(options.get("timeout"), 10, 1, 120)
         
         # Flags pour les infos à extraire
         flags = "-json -silent"
@@ -460,15 +481,36 @@ run
             flags += " -web-server"
         if options.get("follow_redirects", True):
             flags += " -follow-redirects"
-        
+
         # Déterminer si c'est un fichier ou une cible unique
-        import os
+        targets_file_path = targets if os.path.isfile(targets) else None
+        temp_targets_file = None
         if os.path.isfile(targets):
-            cmd = f"httpx -l {targets_safe} {flags} -t {threads} -timeout {timeout_sec} -o {output_file}"
+            targets_file_path = targets
         else:
-            cmd = f"echo '{targets_safe}' | httpx {flags} -t {threads} -timeout {timeout_sec} -o {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
+                tf.write(f"{targets}\n")
+                temp_targets_file = tf.name
+                targets_file_path = temp_targets_file
+
+        command_args = ["httpx", "-l", targets_file_path, "-json", "-silent", "-t", str(threads), "-timeout", str(timeout_sec), "-o", output_file]
+        if options.get("title", True):
+            command_args.append("-title")
+        if options.get("status_code", True):
+            command_args.append("-status-code")
+        if options.get("tech_detect", True):
+            command_args.append("-tech-detect")
+        if options.get("content_length", False):
+            command_args.append("-content-length")
+        if options.get("web_server", True):
+            command_args.append("-web-server")
+        if options.get("follow_redirects", True):
+            command_args.append("-follow-redirects")
+
+        result = await self.executor.run_args(command_args, timeout=600)
+
+        if temp_targets_file and os.path.exists(temp_targets_file):
+            os.unlink(temp_targets_file)
         
         # Parser les résultats JSON
         hosts = []
@@ -486,7 +528,7 @@ run
             "action": "httpx",
             "target": targets,
             "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
+            "command": result.command,
             "output": result.stdout,
             "error": result.stderr if result.return_code != 0 else None,
             "duration": result.duration,
@@ -502,14 +544,26 @@ run
         Pipeline combiné: Subfinder pour trouver les sous-domaines, puis httpx pour vérifier
         """
         options = options or {}
-        domain_safe = escape_shell_arg(domain)
-        
+
+        domain_safe = self._safe_name(domain)
         output_file = f"/tmp/subfinder_httpx_{domain_safe}_{int(datetime.now().timestamp())}.json"
-        
-        # Pipeline: subfinder | httpx
-        cmd = f"subfinder -d {domain_safe} -silent | httpx -silent -json -title -status-code -tech-detect -web-server -o {output_file}"
-        
-        result = await self.executor.run(cmd, timeout=600)
+        subfinder_file = f"/tmp/subfinder_httpx_{domain_safe}_{int(datetime.now().timestamp())}.txt"
+
+        subfinder_result = await self.executor.run_args(
+            ["subfinder", "-d", domain, "-silent", "-o", subfinder_file],
+            timeout=300
+        )
+
+        result = await self.executor.run_args(
+            [
+                "httpx", "-l", subfinder_file, "-silent", "-json",
+                "-title", "-status-code", "-tech-detect", "-web-server", "-o", output_file
+            ],
+            timeout=600
+        )
+
+        if os.path.exists(subfinder_file):
+            os.unlink(subfinder_file)
         
         # Parser les résultats
         hosts = []
@@ -537,10 +591,10 @@ run
         return {
             "action": "subfinder_httpx",
             "target": domain,
-            "status": "completed" if result.return_code == 0 else "error",
-            "command": cmd,
-            "output": result.stdout,
-            "error": result.stderr if result.return_code != 0 else None,
+            "status": "completed" if subfinder_result.return_code == 0 and result.return_code == 0 else "error",
+            "command": f"{subfinder_result.command} && {result.command}",
+            "output": f"{subfinder_result.stdout}\n{result.stdout}",
+            "error": (subfinder_result.stderr + "\n" + result.stderr).strip() if (subfinder_result.return_code != 0 or result.return_code != 0) else None,
             "duration": result.duration,
             "timestamp": result.timestamp,
             "parsed_data": {
