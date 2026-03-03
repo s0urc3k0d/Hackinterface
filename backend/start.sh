@@ -84,7 +84,6 @@ fi
 echo ""
 echo -e "${GREEN}[+] Démarrage de HackInterface...${NC}"
 echo -e "${BLUE}[*] Interface disponible sur: http://127.0.0.1:8080${NC}"
-<<<<<<< HEAD
 
 if [ "$auth_enabled" = "true" ]; then
     echo -e "${GREEN}[*] Auth API activée${NC}"
@@ -93,9 +92,6 @@ if [ "$auth_enabled" = "true" ]; then
 else
     echo -e "${YELLOW}[*] Auth API désactivée (REQUIRE_API_AUTH=${REQUIRE_API_AUTH})${NC}"
 fi
-
-=======
->>>>>>> aa9935201dc516c03e7094d059798c29c9e0fa9d
 echo -e "${YELLOW}[*] Appuyez sur Ctrl+C pour arrêter${NC}"
 echo ""
 
