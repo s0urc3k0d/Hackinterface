@@ -197,7 +197,8 @@ async def api_auth_middleware(request: Request, call_next):
 
     try:
         if settings.REQUIRE_API_AUTH and request.url.path.startswith("/api"):
-            if not _is_valid_api_token(dict(request.headers)):
+            query_token = request.query_params.get("token") or request.query_params.get("api_token")
+            if not _is_valid_api_token(dict(request.headers), query_token):
                 return JSONResponse(
                     status_code=401,
                     content={

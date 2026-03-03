@@ -895,7 +895,14 @@ async function runAction(actionId) {
         const data = await response.json();
         
         if (response.ok) {
-            addTerminalLine(`Action ${actionId} terminée`, 'success');
+            if (data && (data.status === 'error' || data.error)) {
+                const errMessage = data.error || `Action ${actionId} en erreur`;
+                addTerminalLine(`Action ${actionId} en erreur: ${errMessage}`, 'stderr');
+                notify('error', errMessage);
+            } else {
+                addTerminalLine(`Action ${actionId} terminée`, 'success');
+                notify('success', `${actionId} terminé`);
+            }
             loadResults();
         } else {
             notify('error', data.detail || 'Erreur');
@@ -1933,10 +1940,17 @@ function isOffline() {
 
 // Fonction pour mettre en cache les données importantes
 async function cacheImportantData() {
+    const params = new URLSearchParams();
+    if (currentApiToken) {
+        params.set('api_token', currentApiToken);
+    }
+    const query = params.toString();
+    const withToken = (path) => query ? `${path}?${query}` : path;
+
     const urlsToCache = [
-        '/api/workflows',
-        '/api/templates/popular',
-        '/api/tools/status'
+        withToken('/api/workflows/available'),
+        withToken('/api/templates/popular'),
+        withToken('/api/tools/status')
     ];
     
     pwaManager.cacheUrls(urlsToCache);
