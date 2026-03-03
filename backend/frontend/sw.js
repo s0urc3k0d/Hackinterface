@@ -3,21 +3,21 @@
  * Mode hors-ligne avec stratégies de cache intelligentes
  */
 
-const CACHE_VERSION = 'v1.0.0';
+const CACHE_VERSION = 'v1.0.1';
 const CACHE_NAME = `hackinterface-${CACHE_VERSION}`;
 
 // Ressources essentielles à mettre en cache immédiatement
 const CORE_ASSETS = [
     '/',
-    '/index.html',
     '/static/css/style.css',
     '/static/js/app.js',
-    '/manifest.json'
+    '/manifest.json',
+    '/static/icons/icon.svg'
 ];
 
 // Ressources API à mettre en cache pour le mode hors-ligne
 const API_CACHE_PATTERNS = [
-    '/api/workflows',
+    '/api/workflows/available',
     '/api/templates',
     '/api/templates/popular',
     '/api/tools/status',

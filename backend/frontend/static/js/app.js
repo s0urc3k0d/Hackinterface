@@ -96,7 +96,7 @@ class NotificationManager {
             
             const notification = new Notification(`${icons[type] || ''} ${title}`, {
                 body: body,
-                icon: options.icon || '/static/img/icon.png',
+                icon: options.icon || '/static/icons/icon.svg',
                 badge: options.badge,
                 tag: options.tag || `hackinterface-${Date.now()}`,
                 requireInteraction: options.requireInteraction || type === 'error',
