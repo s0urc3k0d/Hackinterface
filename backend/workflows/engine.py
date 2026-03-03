@@ -7,6 +7,7 @@ import asyncio
 import inspect
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
+from contextlib import suppress
 
 from core.websocket_manager import ConnectionManager
 from modules.recon import ReconModule
@@ -479,6 +480,58 @@ class WorkflowEngine:
             return await action_func(target_value, step_options)
 
         return await action_func(target_value)
+
+    async def _invoke_action_with_heartbeat(
+        self,
+        action: str,
+        target_value: str,
+        step_options: Dict[str, Any],
+        ws_manager: ConnectionManager,
+        workflow_id: str,
+        step_name: str,
+        current_step_num: int,
+        total_steps: int,
+        base_progress: float,
+    ):
+        """Exécute une action en envoyant un heartbeat périodique pendant les étapes longues."""
+        heartbeat_interval = int(step_options.get("heartbeat_interval", 8) or 8)
+        heartbeat_interval = max(3, heartbeat_interval)
+
+        step_start = datetime.utcnow()
+        running = True
+
+        async def heartbeat_task():
+            while running:
+                await asyncio.sleep(heartbeat_interval)
+                if not running:
+                    break
+
+                elapsed = (datetime.utcnow() - step_start).total_seconds()
+                await ws_manager.send_workflow_update(
+                    workflow_id=workflow_id,
+                    status="running",
+                    current_step=step_name,
+                    current_step_num=current_step_num,
+                    total_steps=total_steps,
+                    progress_percentage=base_progress,
+                    message=(
+                        f"Étape {current_step_num}/{total_steps} toujours en cours: "
+                        f"{step_name} ({int(elapsed)}s)"
+                    ),
+                    completed_step=False,
+                    data={"action": action, "heartbeat": True, "elapsed": round(elapsed, 1)}
+                )
+
+        heartbeat = asyncio.create_task(heartbeat_task())
+        try:
+            result = await self._invoke_action(action, target_value, step_options)
+            step_duration = (datetime.utcnow() - step_start).total_seconds()
+            return result, step_duration
+        finally:
+            running = False
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
     
     async def execute(
         self,
@@ -514,7 +567,9 @@ class WorkflowEngine:
         await ws_manager.send_workflow_update(
             workflow_id=workflow_id,
             status="started",
-            total_steps=len(workflow["steps"])
+            total_steps=len(workflow["steps"]),
+            progress_percentage=0,
+            message="Démarrage du workflow"
         )
         
         # Initialiser le stockage des résultats
@@ -523,6 +578,8 @@ class WorkflowEngine:
         
         executed_actions = []
         discovered_services = []
+        verbose_logs = bool(options.get("verbose", False))
+        total_steps = len(workflow["steps"])
         
         for i, step in enumerate(workflow["steps"]):
             action = step["action"]
@@ -540,16 +597,47 @@ class WorkflowEngine:
                 status="running",
                 current_step=step_name,
                 current_step_num=i + 1,
-                total_steps=len(workflow["steps"])
+                total_steps=total_steps,
+                progress_percentage=(i / total_steps) * 100,
+                message=f"Étape {i + 1}/{total_steps} en cours: {step_name}",
+                completed_step=False
             )
             
             await ws_manager.send_log("info", f"Exécution: {step_name}")
             
             try:
                 if action in self.action_map:
-                    result = await self._invoke_action(action, target_value, step_options)
+                    result, step_duration = await self._invoke_action_with_heartbeat(
+                        action=action,
+                        target_value=target_value,
+                        step_options=step_options,
+                        ws_manager=ws_manager,
+                        workflow_id=workflow_id,
+                        step_name=step_name,
+                        current_step_num=i + 1,
+                        total_steps=total_steps,
+                        base_progress=(i / total_steps) * 100,
+                    )
                     results_store[target_id][action] = result
                     executed_actions.append(action)
+
+                    await ws_manager.send_workflow_update(
+                        workflow_id=workflow_id,
+                        status="running",
+                        current_step=step_name,
+                        current_step_num=i + 1,
+                        total_steps=total_steps,
+                        progress_percentage=((i + 1) / total_steps) * 100,
+                        message=f"Étape {i + 1}/{total_steps} terminée: {step_name}",
+                        completed_step=True,
+                        data={"action": action, "duration": round(step_duration, 2)}
+                    )
+
+                    if verbose_logs:
+                        await ws_manager.send_log(
+                            "info",
+                            f"Détail étape: {step_name} terminé en {step_duration:.2f}s"
+                        )
                     
                     # Envoyer la mise à jour
                     await ws_manager.send_action_update(
@@ -566,6 +654,17 @@ class WorkflowEngine:
                         
             except Exception as e:
                 await ws_manager.send_log("error", f"Erreur lors de '{step_name}': {str(e)}")
+                await ws_manager.send_workflow_update(
+                    workflow_id=workflow_id,
+                    status="running",
+                    current_step=step_name,
+                    current_step_num=i + 1,
+                    total_steps=total_steps,
+                    progress_percentage=((i + 1) / total_steps) * 100,
+                    message=f"Étape {i + 1}/{total_steps} en erreur: {step_name}",
+                    completed_step=True,
+                    data={"action": action, "error": str(e)}
+                )
                 results_store[target_id][action] = {
                     "action": action,
                     "status": "error",
@@ -584,7 +683,9 @@ class WorkflowEngine:
         
         await ws_manager.send_workflow_update(
             workflow_id=workflow_id,
-            status="completed"
+            status="completed",
+            progress_percentage=100,
+            message="Workflow terminé"
         )
         
         await ws_manager.send_log("success", f"Workflow '{workflow['name']}' terminé")
@@ -594,7 +695,8 @@ class WorkflowEngine:
         actions: List[str],
         target: Dict[str, Any],
         ws_manager: ConnectionManager,
-        results_store: Dict[str, Any]
+        results_store: Dict[str, Any],
+        options: Optional[Dict[str, Any]] = None
     ):
         """
         Exécute un workflow personnalisé
@@ -605,27 +707,65 @@ class WorkflowEngine:
         await ws_manager.send_workflow_update(
             workflow_id="custom",
             status="started",
-            total_steps=len(actions)
+            total_steps=len(actions),
+            progress_percentage=0,
+            message="Démarrage du workflow personnalisé"
         )
         
         if target_id not in results_store:
             results_store[target_id] = {}
+
+        options = options or {}
+        verbose_logs = bool(options.get("verbose", False))
+        total_steps = len(actions)
         
         for i, action in enumerate(actions):
+            step_options = {**options}
             await ws_manager.send_workflow_update(
                 workflow_id="custom",
                 status="running",
                 current_step=action,
                 current_step_num=i + 1,
-                total_steps=len(actions)
+                total_steps=total_steps,
+                progress_percentage=(i / total_steps) * 100,
+                message=f"Étape {i + 1}/{total_steps} en cours: {action}",
+                completed_step=False
             )
             
             await ws_manager.send_log("info", f"Exécution: {action}")
             
             try:
                 if action in self.action_map:
-                    result = await self._invoke_action(action, target_value, {})
+                    result, step_duration = await self._invoke_action_with_heartbeat(
+                        action=action,
+                        target_value=target_value,
+                        step_options=step_options,
+                        ws_manager=ws_manager,
+                        workflow_id="custom",
+                        step_name=action,
+                        current_step_num=i + 1,
+                        total_steps=total_steps,
+                        base_progress=(i / total_steps) * 100,
+                    )
                     results_store[target_id][action] = result
+
+                    await ws_manager.send_workflow_update(
+                        workflow_id="custom",
+                        status="running",
+                        current_step=action,
+                        current_step_num=i + 1,
+                        total_steps=total_steps,
+                        progress_percentage=((i + 1) / total_steps) * 100,
+                        message=f"Étape {i + 1}/{total_steps} terminée: {action}",
+                        completed_step=True,
+                        data={"action": action, "duration": round(step_duration, 2)}
+                    )
+
+                    if verbose_logs:
+                        await ws_manager.send_log(
+                            "info",
+                            f"Détail étape: {action} terminé en {step_duration:.2f}s"
+                        )
                     
                     await ws_manager.send_action_update(
                         action=action,
@@ -635,6 +775,17 @@ class WorkflowEngine:
                     )
             except Exception as e:
                 await ws_manager.send_log("error", f"Erreur: {str(e)}")
+                await ws_manager.send_workflow_update(
+                    workflow_id="custom",
+                    status="running",
+                    current_step=action,
+                    current_step_num=i + 1,
+                    total_steps=total_steps,
+                    progress_percentage=((i + 1) / total_steps) * 100,
+                    message=f"Étape {i + 1}/{total_steps} en erreur: {action}",
+                    completed_step=True,
+                    data={"action": action, "error": str(e)}
+                )
                 results_store[target_id][action] = {
                     "action": action,
                     "status": "error",
@@ -643,7 +794,9 @@ class WorkflowEngine:
         
         await ws_manager.send_workflow_update(
             workflow_id="custom",
-            status="completed"
+            status="completed",
+            progress_percentage=100,
+            message="Workflow personnalisé terminé"
         )
     
     def _check_condition(

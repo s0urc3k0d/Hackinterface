@@ -686,6 +686,7 @@ async def run_custom_workflow(request: dict):
     """Lancer un workflow personnalisé avec actions sélectionnées"""
     target_id = request.get("target_id")
     actions = request.get("actions", [])
+    options = request.get("options", {}) or {}
     
     target = next((t for t in current_session["targets"] if t["id"] == target_id), None)
     if not target:
@@ -700,7 +701,8 @@ async def run_custom_workflow(request: dict):
             actions,
             target,
             ws_manager,
-            current_session["results"]
+            current_session["results"],
+            options
         )
     )
     active_workflow_tasks[task_id] = task

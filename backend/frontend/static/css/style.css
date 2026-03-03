@@ -576,6 +576,21 @@ body {
     margin-bottom: 25px;
 }
 
+.workflow-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.workflow-verbose-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 0.9em;
+    white-space: nowrap;
+}
+
 .workflow-card {
     background: var(--bg-card);
     border: 1px solid var(--border-color);
@@ -668,6 +683,35 @@ body {
     transition: width 0.3s ease;
 }
 
+.progress-fill.indeterminate {
+    position: relative;
+}
+
+.progress-fill.indeterminate::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: -35%;
+    height: 100%;
+    width: 35%;
+    background: rgba(255, 255, 255, 0.3);
+    animation: workflow-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes workflow-indeterminate {
+    0% { left: -35%; }
+    100% { left: 100%; }
+}
+
+.workflow-progress-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.85em;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
 .workflow-log {
     max-height: 200px;
     overflow-y: auto;
@@ -676,6 +720,22 @@ body {
     border-radius: var(--radius);
     font-family: 'Consolas', monospace;
     font-size: 0.85em;
+}
+
+.workflow-log .log-line {
+    margin-bottom: 4px;
+}
+
+.workflow-log .log-line.verbose {
+    color: var(--text-secondary);
+}
+
+.workflow-log .log-line.error {
+    color: var(--accent-danger);
+}
+
+.workflow-log .log-line.success {
+    color: var(--accent-success);
 }
 
 /* ============================================

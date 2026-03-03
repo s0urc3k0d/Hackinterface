@@ -16,6 +16,13 @@ let availableWorkflows = [];
 let currentSessionId = null;
 let currentSessionKey = '';
 let currentApiToken = '';
+let currentWorkflowRun = {
+    active: false,
+    startedAt: null,
+    timerId: null,
+    currentStep: '',
+    verbose: false
+};
 
 const SESSION_KEY_STORAGE_KEY = 'hackinterface_session_key';
 const API_TOKEN_STORAGE_KEY = 'hackinterface_api_token';
@@ -410,29 +417,89 @@ function handleWorkflowUpdate(data) {
     const progressDiv = document.getElementById('workflow-progress');
     const progressBar = document.getElementById('workflow-progress-bar');
     const statusText = document.getElementById('workflow-status-text');
+    const progressPercentage = document.getElementById('workflow-progress-percentage');
+    const elapsedElement = document.getElementById('workflow-elapsed');
     const workflowLog = document.getElementById('workflow-log');
     
     if (data.status === 'started') {
+        currentWorkflowRun.active = true;
+        currentWorkflowRun.startedAt = Date.now();
+        currentWorkflowRun.currentStep = 'Initialisation';
         progressDiv.style.display = 'block';
         progressBar.style.width = '0%';
+        progressBar.classList.add('indeterminate');
+        if (progressPercentage) {
+            progressPercentage.textContent = '0%';
+        }
+        if (elapsedElement) {
+            elapsedElement.textContent = '00:00';
+        }
         workflowLog.innerHTML = '';
+        appendWorkflowLog('Workflow démarré', 'info');
+        startWorkflowElapsedTimer();
         notificationManager.info('Workflow démarré', `Exécution en cours...`);
     } else if (data.status === 'running') {
-        const progress = (data.current_step_num / data.total_steps) * 100;
-        progressBar.style.width = `${progress}%`;
-        statusText.textContent = `Étape ${data.current_step_num}/${data.total_steps}: ${data.current_step}`;
-        workflowLog.innerHTML += `<div class="log-line">[${new Date().toLocaleTimeString()}] ${data.current_step}</div>`;
-        workflowLog.scrollTop = workflowLog.scrollHeight;
+        const hasProgress = typeof data.progress_percentage === 'number';
+        const fallbackProgress = data.total_steps && data.current_step_num
+            ? (data.current_step_num / data.total_steps) * 100
+            : 0;
+        const progressValue = Math.max(0, Math.min(100, hasProgress ? data.progress_percentage : fallbackProgress));
+
+        if (data.current_step) {
+            currentWorkflowRun.currentStep = data.current_step;
+        }
+
+        progressBar.style.width = `${progressValue}%`;
+        progressBar.classList.toggle('indeterminate', !data.completed_step);
+
+        if (progressPercentage) {
+            progressPercentage.textContent = `${Math.round(progressValue)}%`;
+        }
+
+        const defaultStatus = (data.total_steps && data.current_step_num)
+            ? `Étape ${data.current_step_num}/${data.total_steps}: ${data.current_step || ''}`
+            : (data.current_step || 'Exécution en cours...');
+        statusText.textContent = data.message || defaultStatus;
+
+        if (data.message) {
+            appendWorkflowLog(data.message, 'info');
+        } else if (data.current_step) {
+            appendWorkflowLog(data.current_step, 'info');
+        }
     } else if (data.status === 'completed') {
+        currentWorkflowRun.active = false;
+        currentWorkflowRun.currentStep = '';
+        stopWorkflowElapsedTimer();
+        progressBar.classList.remove('indeterminate');
         progressBar.style.width = '100%';
+        if (progressPercentage) {
+            progressPercentage.textContent = '100%';
+        }
         statusText.textContent = 'Workflow terminé !';
+        appendWorkflowLog('Workflow terminé', 'success');
         notify('success', 'Workflow terminé avec succès');
         notificationManager.workflowCompleted(data.workflow_id || 'Workflow');
         loadResults();
         updateStats();
+    } else if (data.status === 'failed') {
+        currentWorkflowRun.active = false;
+        currentWorkflowRun.currentStep = '';
+        stopWorkflowElapsedTimer();
+        progressBar.classList.remove('indeterminate');
+        statusText.textContent = data.message || 'Workflow en échec';
+        appendWorkflowLog(data.message || 'Workflow en échec', 'error');
+        notify('error', data.message || 'Workflow en échec');
     } else if (data.status === 'cancelled') {
+        currentWorkflowRun.active = false;
+        currentWorkflowRun.currentStep = '';
+        stopWorkflowElapsedTimer();
+        progressBar.classList.remove('indeterminate');
         progressBar.style.width = '0%';
+        if (progressPercentage) {
+            progressPercentage.textContent = '0%';
+        }
         statusText.textContent = 'Workflow annulé';
+        appendWorkflowLog('Workflow annulé', 'warning');
         notify('warning', 'Workflow annulé');
         notificationManager.warning('Workflow annulé', 'Le workflow a été interrompu par l\'utilisateur');
     }
@@ -441,6 +508,57 @@ function handleWorkflowUpdate(data) {
 function handleLog(data) {
     addTerminalLine(`[${data.level.toUpperCase()}] ${data.message}`, data.level);
     addActivityLog(data.level, data.message);
+
+    if (currentWorkflowRun.active) {
+        appendWorkflowLog(`[${(data.level || 'info').toUpperCase()}] ${data.message}`, data.level || 'info', true);
+    }
+}
+
+function formatElapsedTime(totalSeconds) {
+    const safeSeconds = Math.max(0, totalSeconds);
+    const minutes = Math.floor(safeSeconds / 60);
+    const seconds = safeSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function startWorkflowElapsedTimer() {
+    stopWorkflowElapsedTimer();
+    currentWorkflowRun.timerId = setInterval(() => {
+        if (!currentWorkflowRun.active || !currentWorkflowRun.startedAt) {
+            return;
+        }
+
+        const elapsedSeconds = Math.floor((Date.now() - currentWorkflowRun.startedAt) / 1000);
+        const elapsedElement = document.getElementById('workflow-elapsed');
+        const statusText = document.getElementById('workflow-status-text');
+
+        if (elapsedElement) {
+            elapsedElement.textContent = formatElapsedTime(elapsedSeconds);
+        }
+
+        if (statusText && currentWorkflowRun.currentStep) {
+            statusText.textContent = `${statusText.textContent.split(' • ')[0]} • ${formatElapsedTime(elapsedSeconds)}`;
+        }
+    }, 1000);
+}
+
+function stopWorkflowElapsedTimer() {
+    if (currentWorkflowRun.timerId) {
+        clearInterval(currentWorkflowRun.timerId);
+        currentWorkflowRun.timerId = null;
+    }
+}
+
+function appendWorkflowLog(message, level = 'info', verboseOnly = false) {
+    const workflowLog = document.getElementById('workflow-log');
+    if (!workflowLog) return;
+    if (verboseOnly && !currentWorkflowRun.verbose) return;
+
+    const line = document.createElement('div');
+    line.className = `log-line ${level} ${verboseOnly ? 'verbose' : ''}`.trim();
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    workflowLog.appendChild(line);
+    workflowLog.scrollTop = workflowLog.scrollHeight;
 }
 
 // ============================================
@@ -969,6 +1087,7 @@ function renderWorkflows() {
 
 async function runWorkflow(workflowId) {
     const targetId = document.getElementById('workflow-target-select').value;
+    const verbose = document.getElementById('workflow-verbose')?.checked || false;
     
     if (!targetId) {
         notify('warning', 'Sélectionnez d\'abord une cible');
@@ -984,11 +1103,12 @@ async function runWorkflow(workflowId) {
             body: JSON.stringify({
                 workflow_id: workflowId,
                 target_id: parseInt(targetId),
-                options: {}
+                options: { verbose }
             })
         });
         
         if (response.ok) {
+            currentWorkflowRun.verbose = verbose;
             document.getElementById('workflow-progress').style.display = 'block';
         }
     } catch (error) {
@@ -998,6 +1118,7 @@ async function runWorkflow(workflowId) {
 
 async function runCustomWorkflow() {
     const targetId = document.getElementById('workflow-target-select').value;
+    const verbose = document.getElementById('workflow-verbose')?.checked || false;
     
     if (!targetId) {
         notify('warning', 'Sélectionnez d\'abord une cible');
@@ -1020,11 +1141,13 @@ async function runCustomWorkflow() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 target_id: parseInt(targetId),
-                actions: actions
+                actions: actions,
+                options: { verbose }
             })
         });
         
         if (response.ok) {
+            currentWorkflowRun.verbose = verbose;
             document.getElementById('workflow-progress').style.display = 'block';
         }
     } catch (error) {

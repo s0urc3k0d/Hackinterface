@@ -61,19 +61,25 @@ class ConnectionManager:
         current_step: str = None,
         total_steps: int = None,
         current_step_num: int = None,
-        data: Any = None
+        data: Any = None,
+        progress_percentage: float = None,
+        message: str = None,
+        completed_step: bool = None
     ):
         """Envoie une mise à jour de workflow"""
-        message = {
+        payload = {
             "type": "workflow_update",
             "workflow_id": workflow_id,
             "status": status,
             "current_step": current_step,
             "total_steps": total_steps,
             "current_step_num": current_step_num,
-            "data": data
+            "data": data,
+            "progress_percentage": progress_percentage,
+            "message": message,
+            "completed_step": completed_step
         }
-        await self.broadcast(message)
+        await self.broadcast(payload)
     
     async def send_log(self, level: str, message: str, source: str = None):
         """Envoie un message de log"""

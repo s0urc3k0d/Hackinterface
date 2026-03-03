@@ -392,9 +392,15 @@
                 <section id="section-workflows" class="section">
                     <div class="section-header">
                         <h2>Workflows automatisés</h2>
-                        <select id="workflow-target-select" class="target-select">
-                            <option value="">Sélectionner une cible...</option>
-                        </select>
+                        <div class="workflow-toolbar">
+                            <label class="workflow-verbose-toggle" for="workflow-verbose">
+                                <input type="checkbox" id="workflow-verbose">
+                                Mode verbose
+                            </label>
+                            <select id="workflow-target-select" class="target-select">
+                                <option value="">Sélectionner une cible...</option>
+                            </select>
+                        </div>
                     </div>
 
                     <div class="workflows-grid" id="workflows-grid">
@@ -419,6 +425,10 @@
                         <div class="progress-info">
                             <div class="progress-bar">
                                 <div class="progress-fill" id="workflow-progress-bar"></div>
+                            </div>
+                            <div class="workflow-progress-meta">
+                                <span id="workflow-progress-percentage">0%</span>
+                                <span id="workflow-elapsed">00:00</span>
                             </div>
                             <p id="workflow-status-text">Initialisation...</p>
                         </div>
